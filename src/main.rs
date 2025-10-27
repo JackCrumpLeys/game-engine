@@ -1,26 +1,36 @@
-// main.rs or lib.rs
+// main.rs
 
 use std::sync::Arc;
-use vulkano::VulkanLibrary;
-use vulkano::device::QueueFlags;
-use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
-use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
-use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::WindowBuilder;
+use vulkano::{
+    VulkanLibrary,
+    device::QueueFlags,
+    device::physical::{PhysicalDevice, PhysicalDeviceType},
+    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
+};
+use winit::{
+    application::ApplicationHandler,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    window::{Window, WindowId},
+};
 
-// Our main application struct
-struct VulkanApp {
-    instance: Arc<Instance>,
-    physical_device: Arc<PhysicalDevice>,
-    // We will add more here soon: Window, EventLoop, Logical Device, Queue, etc.
+// Our main application struct, implementing the ApplicationHandler trait
+#[derive(Default)]
+struct GameApp {
+    instance: Option<Arc<Instance>>,
+    physical_device: Option<Arc<PhysicalDevice>>,
+    window: Option<Arc<Window>>,
 }
 
-impl VulkanApp {
-    pub fn new(event_loop: &EventLoop<()>) -> Self {
+impl ApplicationHandler for GameApp {
+    // This is called when the event loop is ready to run.
+    // It's the perfect place for one-time setup.
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        println!("Resumed. Initializing Vulkan and creating window...");
+
         // --- Instance Creation ---
         let library = VulkanLibrary::new().expect("no local Vulkan library/DLL");
-        // In the future, we'll need extensions for windowing. For now, this is fine.
+
         let instance = Instance::new(
             library,
             InstanceCreateInfo {
@@ -55,31 +65,46 @@ impl VulkanApp {
             physical_device.properties().device_type
         );
 
-        Self {
-            instance,
-            physical_device,
-        }
+        // --- Window Creation ---
+        // A window can only be created inside an active event loop.
+        let window = Arc::new(
+            event_loop
+                .create_window(Window::default_attributes())
+                .unwrap(),
+        );
+
+        self.instance = Some(instance);
+        self.physical_device = Some(physical_device);
+        self.window = Some(window);
     }
 
-    pub fn run(self, event_loop: EventLoop<()>) {
-        // For now, let's just create a window and a basic event loop.
-        // We are not drawing anything yet.
-        let window = Arc::new(WindowBuilder::new().build(&event_loop).unwrap());
-
-        event_loop.run(|event, _, control_flow| match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                *control_flow = ControlFlow::Exit;
+    // This is our new "main loop" for handling events.
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        match event {
+            WindowEvent::CloseRequested => {
+                println!("The close button was pressed; stopping");
+                event_loop.exit();
+            }
+            WindowEvent::RedrawRequested => {
+                // This is where our drawing logic will go.
+                // For now, we do nothing.
             }
             _ => (),
-        });
+        }
     }
 }
 
 fn main() {
-    let event_loop = EventLoop::new();
-    let app = VulkanApp::new(&event_loop);
-    app.run(event_loop);
+    let event_loop = EventLoop::new().unwrap();
+
+    // Continuously runs the event loop, ideal for games.
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut app = GameApp::default();
+    event_loop.run_app(&mut app).unwrap();
 }
