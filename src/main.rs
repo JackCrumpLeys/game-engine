@@ -83,7 +83,7 @@ impl GameApp {
             })
             .expect("Failed to recreate swapchain");
 
-        log::info!("Swapchain recreated with {} images", new_images.len());
+        log::debug!("Swapchain recreated with {} images", new_images.len());
 
         self.swapchain = Some(new_swapchain);
         self.swapchain_images = new_images;
