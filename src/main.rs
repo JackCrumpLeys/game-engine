@@ -8,10 +8,13 @@ use std::{
 use vulkano::{
     VulkanLibrary,
     device::{
-        Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags,
+        Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
         physical::{PhysicalDevice, PhysicalDeviceType},
     },
-    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
+    format::Format,
+    image::Image,
+    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo, InstanceExtensions},
+    swapchain::{PresentMode, Surface, Swapchain, SwapchainCreateInfo},
 };
 use winit::{
     application::ApplicationHandler,
@@ -19,8 +22,6 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{Window, WindowId},
 };
-
-use vulkano::swapchain::Surface;
 
 use ecs::World;
 
@@ -42,6 +43,9 @@ struct GameApp {
     window: Option<Arc<Window>>,
     device: Option<Arc<Device>>,
     queue: Option<Arc<Queue>>,
+    surface: Option<Arc<Surface>>,
+    swapchain: Option<Arc<Swapchain>>,
+    swapchain_images: Vec<Arc<Image>>,
     world: World,
 }
 
@@ -53,8 +57,36 @@ impl Default for GameApp {
             window: None,
             device: None,
             queue: None,
+            surface: None,
+            swapchain: None,
+            swapchain_images: Vec::new(),
             world: World::new(),
         }
+    }
+}
+
+impl GameApp {
+    fn recreate_swapchain(&mut self) {
+        let window = match &self.window {
+            Some(w) => w,
+            None => return,
+        };
+        let old_swapchain = match &self.swapchain {
+            Some(s) => s,
+            None => return,
+        };
+
+        let (new_swapchain, new_images) = old_swapchain
+            .recreate(SwapchainCreateInfo {
+                image_extent: window.inner_size().into(),
+                ..old_swapchain.create_info()
+            })
+            .expect("Failed to recreate swapchain");
+
+        log::debug!("Swapchain recreated with {} images", new_images.len());
+
+        self.swapchain = Some(new_swapchain);
+        self.swapchain_images = new_images;
     }
 }
 
@@ -74,7 +106,17 @@ impl ApplicationHandler for GameApp {
         )
         .expect("failed to create instance");
 
-        // --- Physical Device Selection ---
+        // --- Window Creation ---
+        let window = Arc::new(
+            event_loop
+                .create_window(Window::default_attributes())
+                .unwrap(),
+        );
+
+        // --- Surface Creation ---
+        let surface = Surface::from_window(instance.clone(), window.clone()).unwrap();
+
+        // --- Physical Device Selection (with surface support) ---
         let (physical_device, queue_family_index) = instance
             .enumerate_physical_devices()
             .expect("could not enumerate devices")
@@ -82,7 +124,10 @@ impl ApplicationHandler for GameApp {
                 p.queue_family_properties()
                     .iter()
                     .enumerate()
-                    .position(|(i, q)| q.queue_flags.contains(QueueFlags::GRAPHICS))
+                    .position(|(i, q)| {
+                        q.queue_flags.contains(QueueFlags::GRAPHICS)
+                            && p.surface_support(i as u32, &surface).unwrap_or(false)
+                    })
                     .map(|i| (p, i as u32))
             })
             .min_by_key(|(p, _)| match p.properties().device_type {
@@ -108,6 +153,10 @@ impl ApplicationHandler for GameApp {
                     queue_family_index,
                     ..Default::default()
                 }],
+                enabled_extensions: DeviceExtensions {
+                    khr_swapchain: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )
@@ -115,12 +164,57 @@ impl ApplicationHandler for GameApp {
 
         let queue = queues.next().unwrap();
 
-        // --- Window Creation ---
-        let window = Arc::new(
-            event_loop
-                .create_window(Window::default_attributes())
-                .unwrap(),
+        // --- Swapchain Capabilities and Format Selection ---
+        let surface_capabilities = physical_device
+            .surface_capabilities(&surface, Default::default())
+            .expect("Failed to get surface capabilities");
+
+        let image_format = physical_device
+            .surface_formats(&surface, Default::default())
+            .expect("Failed to get surface formats")
+            .into_iter()
+            .find(|(format, _)| matches!(format, Format::B8G8R8A8_SRGB | Format::R8G8B8A8_SRGB))
+            .unwrap_or_else(|| {
+                physical_device
+                    .surface_formats(&surface, Default::default())
+                    .unwrap()[0]
+            })
+            .0;
+
+        let present_mode = physical_device
+            .surface_present_modes(&surface, Default::default())
+            .expect("Failed to get present modes")
+            .into_iter()
+            .find(|&mode| mode == PresentMode::Fifo)
+            .unwrap_or(PresentMode::Fifo);
+
+        log::info!(
+            "Selected image format: {:?}, present mode: {:?}",
+            image_format,
+            present_mode
         );
+
+        // --- Swapchain Creation ---
+        let (swapchain, images) = Swapchain::new(
+            device.clone(),
+            surface.clone(),
+            SwapchainCreateInfo {
+                min_image_count: surface_capabilities.min_image_count.max(2),
+                image_format,
+                image_extent: window.inner_size().into(),
+                image_usage: vulkano::image::ImageUsage::COLOR_ATTACHMENT,
+                composite_alpha: surface_capabilities
+                    .supported_composite_alpha
+                    .into_iter()
+                    .next()
+                    .unwrap(),
+                present_mode,
+                ..Default::default()
+            },
+        )
+        .expect("Failed to create swapchain");
+
+        log::info!("Swapchain created with {} images", images.len());
 
         // --- Store Core Objects ---
         self.instance = Some(instance);
@@ -128,6 +222,9 @@ impl ApplicationHandler for GameApp {
         self.window = Some(window);
         self.device = Some(device);
         self.queue = Some(queue);
+        self.surface = Some(surface);
+        self.swapchain = Some(swapchain);
+        self.swapchain_images = images;
 
         // --- Test Scene in ECS ---
         let entity1 = self.world.spawn_entity();
@@ -151,6 +248,10 @@ impl ApplicationHandler for GameApp {
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(_) | WindowEvent::Focused(_) => {
+                // Recreate swapchain when window is resized or focus changes
+                self.recreate_swapchain();
+            }
             WindowEvent::RedrawRequested => {
                 // Placeholder render system logic
                 log::info!("--- FRAME START ---");
