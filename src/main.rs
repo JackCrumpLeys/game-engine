@@ -8,13 +8,13 @@ use std::{
 use vulkano::{
     VulkanLibrary,
     device::{
-        Device, DeviceCreateInfo, Queue, QueueCreateInfo, QueueFlags,
+        Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
         physical::{PhysicalDevice, PhysicalDeviceType},
     },
-    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
-    swapchain::{Surface, Swapchain, SwapchainCreateInfo, PresentMode},
-    image::Image,
     format::Format,
+    image::Image,
+    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo, InstanceExtensions},
+    swapchain::{PresentMode, Surface, Swapchain, SwapchainCreateInfo},
 };
 use winit::{
     application::ApplicationHandler,
@@ -126,8 +126,7 @@ impl ApplicationHandler for GameApp {
                     .enumerate()
                     .position(|(i, q)| {
                         q.queue_flags.contains(QueueFlags::GRAPHICS)
-                            && p.surface_support(i as u32, &surface)
-                                .unwrap_or(false)
+                            && p.surface_support(i as u32, &surface).unwrap_or(false)
                     })
                     .map(|i| (p, i as u32))
             })
@@ -154,6 +153,10 @@ impl ApplicationHandler for GameApp {
                     queue_family_index,
                     ..Default::default()
                 }],
+                enabled_extensions: DeviceExtensions {
+                    khr_swapchain: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )
