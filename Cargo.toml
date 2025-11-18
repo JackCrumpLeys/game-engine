@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-dacite-winit = "0.7.0"
+fern = "0.7.1"
 glam = "0.30.8"
 image = "0.25.8"
+log = "0.4.28"
 vulkano = "0.35.2"
 vulkano-shaders = "0.35.0"
 winit = "0.30.12"
