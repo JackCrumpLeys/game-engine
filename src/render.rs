@@ -1,12 +1,14 @@
 /// render module:
 /// Makes the window, initializes Vulkan, manages swapchain, and contains the render world ECS.
 pub mod components;
+mod packet;
 mod pass;
 
 use std::sync::Arc;
 
 use vulkano::{
     VulkanLibrary,
+    buffer::{Buffer, BufferContents},
     device::{
         Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
         physical::{PhysicalDevice, PhysicalDeviceType},
@@ -14,6 +16,7 @@ use vulkano::{
     format::Format,
     image::Image,
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
+    pipeline::graphics::vertex_input::Vertex,
     swapchain::{PresentMode, Surface, Swapchain, SwapchainCreateInfo},
 };
 use winit::{
@@ -24,7 +27,13 @@ use winit::{
     window::{Window, WindowId},
 };
 
-use crate::{ecs::World, render::components::Renderable};
+use crate::{
+    ecs::World,
+    render::{
+        components::Renderable,
+        packet::{Interpolate, RenderPacket},
+    },
+};
 
 pub struct RenderManager {
     render_world: World,
@@ -36,6 +45,31 @@ pub struct RenderManager {
     surface: Option<Arc<Surface>>,
     swapchain: Option<Arc<Swapchain>>,
     swapchain_images: Vec<Arc<Image>>,
+    snapshot_pair: Option<SnapshotPair>,
+}
+
+/// The renderer will interpolate between two snapshots to produce smooth animations.
+pub struct SnapshotPair {
+    old: RenderPacket,
+    new: RenderPacket,
+}
+
+impl SnapshotPair {
+    pub fn new(old: RenderPacket, new: RenderPacket) -> Self {
+        Self { old, new }
+    }
+
+    /// replaces the "new" snapshot with the provided one, and moves the previous "new" to "old"
+    pub fn push_new(&mut self, new: RenderPacket) {
+        self.old = std::mem::replace(&mut self.new, new);
+    }
+
+    pub fn interpolate(&self) -> RenderPacket {
+        let now = std::time::Instant::now();
+        let duration_since_old = now.duration_since(self.old.snapped_at);
+        /// WIP TODO
+        self.old.interpolate(&self.new, factor)
+    }
 }
 
 impl RenderManager {

@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use vulkano::buffer::BufferContents;
+use vulkano::buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage};
+use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 /// Manegement of rendering passes
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, SubpassBeginInfo, SubpassEndInfo,
@@ -9,6 +10,7 @@ use vulkano::command_buffer::{
 use vulkano::device::{Device, Queue};
 use vulkano::image::Image;
 use vulkano::image::view::ImageView;
+use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
 use vulkano::pipeline::graphics::color_blend::{ColorBlendAttachmentState, ColorBlendState};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
@@ -28,15 +30,7 @@ struct PassManager {
     render_pass: Arc<RenderPass>,
     framebuffers: Vec<Arc<Framebuffer>>,
     pipeline: Arc<GraphicsPipeline>,
-}
-
-// We use `#[repr(C)]` here to force rustc to use a defined layout for our data, as the default
-// representation has *no guarantees*.
-#[derive(BufferContents, Vertex)]
-#[repr(C)]
-struct MyVertex {
-    #[format(R32G32_SFLOAT)]
-    position: [f32; 2],
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
 }
 
 impl PassManager {
@@ -221,10 +215,47 @@ impl PassManager {
             .unwrap()
         };
 
+        let memory_allocator = Arc::new(StandardMemoryAllocator::new(
+            device.clone(),
+            Default::default(),
+        ));
+
+        // We now create a buffer that will store the shape of our triangle.
+        let vertices = [
+            MyVertex {
+                position: [-0.5, -0.25],
+            },
+            MyVertex {
+                position: [0.0, 0.5],
+            },
+            MyVertex {
+                position: [0.25, -0.1],
+            },
+        ];
+        let vertex_buffer = Buffer::from_iter(
+            &memory_allocator,
+            &BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            },
+            &AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            vertices,
+        )
+        .unwrap();
+
         PassManager {
             render_pass,
             framebuffers,
             pipeline,
+            command_buffer_allocator: Arc::new(StandardCommandBufferAllocator::new(
+                device.clone(),
+                Default::default(),
+            )),
+            vertex_buffer,
         }
     }
 
@@ -232,13 +263,15 @@ impl PassManager {
         self.framebuffers = window_size_dependent_setup(&images, &self.render_pass);
     }
 
-    pub fn do_pass(swapchain: &Swapchain, device: Arc<Device>, queue: &Queue) {
+    pub fn do_pass(&mut self, swapchain: &Swapchain, device: Arc<Device>, queue: &Queue) {
         let mut builder = AutoCommandBufferBuilder::primary(
-            device.clone(),
+            self.command_buffer_allocator.clone(),
             queue.queue_family_index(),
             CommandBufferUsage::MultipleSubmit,
         )
         .unwrap();
+
+        // BEGIN RENDER PASS
     }
 }
 /// This function is called once during initialization, then again whenever the window is resized.
@@ -249,12 +282,12 @@ fn window_size_dependent_setup(
     images
         .iter()
         .map(|image| {
-            let view = ImageView::new_default(image).unwrap();
+            let view = ImageView::new_default(image.clone()).unwrap();
 
             Framebuffer::new(
-                render_pass,
-                &FramebufferCreateInfo {
-                    attachments: &[&view],
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![view],
                     ..Default::default()
                 },
             )
