@@ -4,6 +4,7 @@ use std::{
 };
 
 use game_engine::GameApp;
+use game_engine::render::components::{Position, Renderable};
 use winit::event_loop::{ControlFlow, EventLoop};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -27,13 +28,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         // Apply globally
         .apply()?;
 
-    let event_loop = EventLoop::new().unwrap();
-
-    // Continuously runs the event loop, ideal for games.
-    event_loop.set_control_flow(ControlFlow::Poll);
-
     let mut app = GameApp::default();
-    event_loop.run_app(&mut app).unwrap();
+
+    let world = app.world_mut();
+
+    // --- Test Scene in ECS ---
+    let entity1 = world.spawn_entity();
+    world.add_component(entity1, Position { x: 0.0, y: 0.0 });
+    world.add_component(entity1, Renderable { mesh_id: 1 });
+    let entity2 = world.spawn_entity();
+    world.add_component(entity2, Position { x: 10.0, y: 5.0 });
+    let entity3 = world.spawn_entity();
+    world.add_component(entity3, Position { x: -5.0, y: 2.0 });
+    world.add_component(entity3, Renderable { mesh_id: 2 });
+
+    app.run();
 
     Ok(())
 }

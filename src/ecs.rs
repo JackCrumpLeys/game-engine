@@ -4,7 +4,6 @@ use std::collections::HashMap;
 // An Entity is just a unique ID. Using a struct provides more type safety than a raw integer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Entity(u64);
-
 // The World manages all entities and components.
 pub struct World {
     entities: Vec<Entity>,
@@ -66,6 +65,13 @@ impl World {
         }
 
         results
+    }
+
+    /// clear the world, removing all entities and components
+    pub fn clear(&mut self) {
+        self.entities.clear();
+        self.component_stores.clear();
+        self.next_entity_id = 0;
     }
 }
 
