@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ))
         })
         // Add blanket level filter -
-        .level(log::LevelFilter::Debug)
+        .level(log::LevelFilter::Trace)
         // Output to stdout, files, and other Dispatch configurations
         .chain(std::io::stdout())
         .chain(fern::log_file("output.log")?)
@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     world.add_component(entity3, Position { x: -5.0, y: 2.0 });
     world.add_component(entity3, Renderable { mesh_id: 2 });
 
-    app.run();
+    app.run()?;
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 /// render module:
 /// Makes the window, initializes Vulkan, manages swapchain, and contains the render world ECS.
 pub mod components;
-mod packet;
+pub mod packet;
 mod pass;
 
 use std::sync::Arc;
@@ -28,90 +28,84 @@ use winit::{
 };
 
 use crate::{
+    GameEngineResult,
     ecs::World,
     render::{
         components::Renderable,
-        packet::{Interpolate, RenderPacket},
+        packet::{Interpolate, RenderPacket, SnapshotPair},
+        pass::PassManager,
     },
 };
 
 pub struct RenderManager {
     render_world: World,
-    instance: Option<Arc<Instance>>,
-    physical_device: Option<Arc<PhysicalDevice>>,
-    window: Option<Arc<Window>>,
-    device: Option<Arc<Device>>,
-    queue: Option<Arc<Queue>>,
-    surface: Option<Arc<Surface>>,
-    swapchain: Option<Arc<Swapchain>>,
-    swapchain_images: Vec<Arc<Image>>,
+    render_ctx: Option<RenderContext>,
     snapshot_pair: Option<SnapshotPair>,
 }
 
-/// The renderer will interpolate between two snapshots to produce smooth animations.
-pub struct SnapshotPair {
-    old: RenderPacket,
-    new: RenderPacket,
-}
-
-impl SnapshotPair {
-    pub fn new(old: RenderPacket, new: RenderPacket) -> Self {
-        Self { old, new }
-    }
-
-    /// replaces the "new" snapshot with the provided one, and moves the previous "new" to "old"
-    pub fn push_new(&mut self, new: RenderPacket) {
-        self.old = std::mem::replace(&mut self.new, new);
-    }
-
-    pub fn interpolate(&self) -> RenderPacket {
-        let now = std::time::Instant::now();
-        let duration_since_old = now.duration_since(self.old.snapped_at);
-        /// WIP TODO
-        self.old.interpolate(&self.new, factor)
-    }
+struct RenderContext {
+    pass_manager: PassManager,
+    instance: Arc<Instance>,
+    physical_device: Arc<PhysicalDevice>,
+    window: Arc<Window>,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    surface: Arc<Surface>,
+    swapchain: Arc<Swapchain>,
+    swapchain_images: Vec<Arc<Image>>,
 }
 
 impl RenderManager {
+    pub fn window(&self) -> GameEngineResult<Arc<Window>> {
+        match &self.render_ctx {
+            Some(rcx) => Ok(rcx.window.clone()),
+            None => Err("Render context not initialized".into()),
+        }
+    }
+
     fn recreate_swapchain(&mut self) {
-        let window = match &self.window {
-            Some(w) => w,
-            None => return,
-        };
-        let old_swapchain = match &self.swapchain {
-            Some(s) => s,
+        let rcx = match &mut self.render_ctx {
+            Some(rcx) => rcx,
             None => return,
         };
 
-        let (new_swapchain, new_images) = old_swapchain
+        let (new_swapchain, new_images) = rcx
+            .swapchain
             .recreate(SwapchainCreateInfo {
-                image_extent: window.inner_size().into(),
-                ..old_swapchain.create_info()
+                image_extent: rcx.window.inner_size().into(),
+                ..rcx.swapchain.create_info()
             })
             .expect("Failed to recreate swapchain");
 
-        log::info!("Swapchain recreated with {} images", new_images.len());
+        log::debug!("Swapchain recreated with {} images", new_images.len());
 
-        self.swapchain = Some(new_swapchain);
-        self.swapchain_images = new_images;
+        rcx.pass_manager.resize(&new_images);
+
+        rcx.swapchain = new_swapchain;
+        rcx.swapchain_images = new_images;
     }
 
     pub fn new() -> Self {
         Self {
             render_world: World::new(),
-            instance: None,
-            physical_device: None,
-            window: None,
-            device: None,
-            queue: None,
-            surface: None,
-            swapchain: None,
-            swapchain_images: Vec::new(),
+            render_ctx: None,
+            snapshot_pair: None,
         }
     }
 
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.render_world
+    }
+
+    pub fn push_snapshot(&mut self, snapshot: RenderPacket) {
+        match self.snapshot_pair {
+            Some(ref mut pair) => {
+                pair.push_new(snapshot);
+            }
+            None => {
+                self.snapshot_pair = Some(SnapshotPair::new(snapshot.clone(), snapshot));
+            }
+        }
     }
 }
 
@@ -241,15 +235,22 @@ impl ApplicationHandler for RenderManager {
 
         log::info!("Swapchain created with {} images", images.len());
 
-        // --- Store Core Objects ---
-        self.instance = Some(instance);
-        self.physical_device = Some(physical_device);
-        self.window = Some(window);
-        self.device = Some(device);
-        self.queue = Some(queue);
-        self.surface = Some(surface);
-        self.swapchain = Some(swapchain);
-        self.swapchain_images = images;
+        let pass_manager =
+            PassManager::new(device.clone(), swapchain.clone(), &images, window.clone()).unwrap();
+
+        let rcx = RenderContext {
+            pass_manager,
+            instance,
+            physical_device,
+            window,
+            device,
+            queue,
+            surface,
+            swapchain,
+            swapchain_images: images,
+        };
+
+        self.render_ctx = Some(rcx);
     }
 
     fn window_event(
@@ -265,21 +266,44 @@ impl ApplicationHandler for RenderManager {
                 self.recreate_swapchain();
             }
             WindowEvent::RedrawRequested => {
-                // Placeholder render system logic
-                log::info!("--- FRAME START ---");
-                let render_query = self.render_world.query::<Renderable>();
-                let position_query = self.render_world.query::<Position>();
+                log::trace!("--- FRAME START ---");
+                match &mut self.render_ctx {
+                    Some(rcx) => {
+                        // Handle rendering here
+                        if let Some(snapshot_pair) = &mut self.snapshot_pair {
+                            // Interpolate between snapshots
+                            let interpolated_snapshot = snapshot_pair.interpolate();
 
-                for (entity, renderable) in render_query {
-                    if let Some((_, pos)) = position_query.iter().find(|(e, _)| *e == entity) {
-                        log::info!(
-                            "Drawing entity {:?} with mesh {} at {:?}",
-                            entity,
-                            renderable.mesh_id,
-                            pos
-                        );
+                            // Render the interpolated snapshot
+                            rcx.pass_manager.load_packet(&interpolated_snapshot);
+                            // Finally do pass
+                            match rcx.pass_manager.do_pass(
+                                rcx.swapchain.clone(),
+                                rcx.device.clone(),
+                                rcx.queue.clone(),
+                            ) {
+                                Ok(r) => match r {
+                                    pass::PassResult::Success => {
+                                        log::trace!("Frame rendered successfully")
+                                    }
+                                    pass::PassResult::SwapchainOutOfDate => {
+                                        log::warn!(
+                                            "Swapchain out of date during rendering, recreating..."
+                                        );
+                                        self.recreate_swapchain();
+                                    }
+                                },
+                                Err(e) => log::error!("Rendering error: {:?}", e),
+                            }
+                        } else {
+                            log::warn!("No snapshot pair available for rendering");
+                        }
+                    }
+                    None => {
+                        log::warn!("Render context not initialized");
                     }
                 }
+                log::trace!("--- FRAME END ---");
             }
             _ => (),
         }

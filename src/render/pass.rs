@@ -1,11 +1,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use vulkano::buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage};
+use vulkano::buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo};
+use vulkano::buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 /// Manegement of rendering passes
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, SubpassBeginInfo, SubpassEndInfo,
+    AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
+    SubpassContents, SubpassEndInfo,
 };
 use vulkano::device::{Device, Queue};
 use vulkano::image::Image;
@@ -17,24 +19,43 @@ use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::rasterization::RasterizationState;
 use vulkano::pipeline::graphics::vertex_input::{Vertex, VertexDefinition};
-use vulkano::pipeline::graphics::viewport::ViewportState;
+use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayoutCreateInfo};
 use vulkano::pipeline::{
     DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo,
 };
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
-use vulkano::swapchain::Swapchain;
-use vulkano::sync::GpuFuture;
+use vulkano::swapchain::{Swapchain, SwapchainPresentInfo, acquire_next_image};
+use vulkano::sync::{self, GpuFuture};
+use vulkano::{Validated, VulkanError};
+use winit::window::{self, Window};
 
-struct PassManager {
+use crate::GameEngineResult;
+use crate::render::packet::{RenderPacket, VulVertex};
+
+pub struct PassManager {
     render_pass: Arc<RenderPass>,
     framebuffers: Vec<Arc<Framebuffer>>,
     pipeline: Arc<GraphicsPipeline>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    previous_frame_end: Option<Box<dyn GpuFuture>>,
+    viewport: Viewport,
+    subbuffers: Buffers,
+    subbuffer_allocator: SubbufferAllocator,
+}
+
+// Eventully we will have much more of a multi file layout and proper render graph
+pub struct Buffers {
+    pub vertex_buffer: Subbuffer<[VulVertex]>,
 }
 
 impl PassManager {
-    pub fn new(device: Arc<Device>, swapchain: Arc<Swapchain>, images: Vec<Arc<Image>>) -> Self {
+    pub fn new(
+        device: Arc<Device>,
+        swapchain: Arc<Swapchain>,
+        images: &Vec<Arc<Image>>,
+        window: Arc<Window>,
+    ) -> GameEngineResult<Self> {
         // The next step is to create a *render pass*, which is an object that describes where the
         // output of the graphics pipeline will go. It describes the layout of the images where the
         // colors, depth and/or stencil information will be written.
@@ -67,8 +88,7 @@ impl PassManager {
                 // No depth-stencil attachment is indicated with empty brackets.
                 depth_stencil: {},
             },
-        )
-        .unwrap();
+        )?;
 
         // The render pass we created above only describes the layout of our framebuffers. Before
         // we can draw we also need to create the actual framebuffers.
@@ -132,18 +152,12 @@ impl PassManager {
             //
             // A Vulkan shader can in theory contain multiple entry points, so we have to specify
             // which one.
-            let vs = vs::load(device.clone())
-                .unwrap()
-                .entry_point("main")
-                .unwrap();
-            let fs = fs::load(device.clone())
-                .unwrap()
-                .entry_point("main")
-                .unwrap();
+            let vs = vs::load(device.clone())?.entry_point("main").unwrap();
+            let fs = fs::load(device.clone())?.entry_point("main").unwrap();
 
             // Automatically generate a vertex input state from the vertex shader's input
             // interface, that takes a single vertex buffer containing `Vertex` structs.
-            let vertex_input_state = MyVertex::per_vertex().definition(&vs).unwrap();
+            let vertex_input_state = VulVertex::per_vertex().definition(&vs)?;
 
             // Make a list of the shader stages that the pipeline will have.
             let stages = vec![
@@ -168,10 +182,8 @@ impl PassManager {
             let layout = PipelineLayout::new(
                 device.clone(),
                 PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                    .into_pipeline_layout_create_info(device.clone())
-                    .unwrap(),
-            )
-            .unwrap();
+                    .into_pipeline_layout_create_info(device.clone())?,
+            )?;
 
             // We have to indicate which subpass of which render pass this pipeline is going to be
             // used in. The pipeline will only be usable from this particular subpass.
@@ -211,43 +223,40 @@ impl PassManager {
                     subpass: Some(subpass.into()),
                     ..GraphicsPipelineCreateInfo::layout(layout)
                 },
-            )
-            .unwrap()
+            )?
         };
 
-        let memory_allocator = Arc::new(StandardMemoryAllocator::new(
-            device.clone(),
-            Default::default(),
-        ));
+        let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
-        // We now create a buffer that will store the shape of our triangle.
-        let vertices = [
-            MyVertex {
-                position: [-0.5, -0.25],
-            },
-            MyVertex {
-                position: [0.0, 0.5],
-            },
-            MyVertex {
-                position: [0.25, -0.1],
-            },
-        ];
-        let vertex_buffer = Buffer::from_iter(
-            &memory_allocator,
-            &BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER,
-                ..Default::default()
-            },
-            &AllocationCreateInfo {
+        let subbuffer_allocator = SubbufferAllocator::new(
+            memory_allocator.clone(),
+            SubbufferAllocatorCreateInfo {
+                buffer_usage: BufferUsage::VERTEX_BUFFER,
+                // HOST_SEQUENTIAL_WRITE means: CPU writes once, GPU reads once.
+                // Perfect for dynamic 2D geometry.
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vertices,
-        )
-        .unwrap();
+        );
 
-        PassManager {
+        // Allocate a dummy empty buffer just so `self.vertex_buffer` has something valid to start with
+        let vertex_buffer = subbuffer_allocator
+            .allocate_slice::<VulVertex>(3)
+            .expect("failed to allocate initial buffer");
+
+        // Dynamic viewports allow us to recreate just the viewport when the window is resized.
+        // Otherwise we would have to recreate the whole pipeline.
+        let viewport = Viewport {
+            offset: [0.0, 0.0],
+            extent: window.inner_size().into(),
+            depth_range: 0.0..=1.0,
+        };
+
+        let previous_frame_end = Some(sync::now(device.clone()).boxed());
+
+        Ok(PassManager {
+            viewport,
             render_pass,
             framebuffers,
             pipeline,
@@ -255,25 +264,162 @@ impl PassManager {
                 device.clone(),
                 Default::default(),
             )),
-            vertex_buffer,
-        }
+            previous_frame_end,
+            subbuffer_allocator,
+            subbuffers: Buffers { vertex_buffer },
+        })
     }
 
-    pub fn resize(&mut self, images: Vec<Arc<Image>>) {
+    pub fn resize(&mut self, images: &Vec<Arc<Image>>) {
         self.framebuffers = window_size_dependent_setup(&images, &self.render_pass);
     }
 
-    pub fn do_pass(&mut self, swapchain: &Swapchain, device: Arc<Device>, queue: &Queue) {
+    pub fn load_packet(&mut self, packet: &RenderPacket) {
+        let vertex_data = packet.vertex_buffer();
+
+        if vertex_data.is_empty() {
+            return;
+        }
+
+        // 1. Ask the allocator for a slice of memory big enough for our vertices
+        let buffer = self
+            .subbuffer_allocator
+            .allocate_slice(vertex_data.len() as u64)
+            .expect("Failed to allocate vertex buffer");
+
+        // 2. Map the memory and write to it
+        // syntax: .write() locks the CPU-side pointer to copy data
+        {
+            let mut buffer_map = buffer.write().unwrap();
+            buffer_map.copy_from_slice(vertex_data);
+        }
+
+        // 3. Store it for the draw call
+        // The allocator guarantees this new 'buffer' does NOT conflict with
+        // what the GPU is currently reading from the previous frame.
+        self.subbuffers.vertex_buffer = buffer;
+    }
+
+    pub fn do_pass(
+        &mut self,
+        swapchain: Arc<Swapchain>,
+        device: Arc<Device>,
+        queue: Arc<Queue>,
+    ) -> GameEngineResult<PassResult> {
+        if let Some(gpu_future) = self.previous_frame_end.as_mut() {
+            gpu_future.cleanup_finished();
+        }
+
+        // Before we can draw on the output, we have to *acquire* an image from the
+        // swapchain. If no image is available (which happens if you submit draw commands
+        // too quickly), then the function will block. This operation returns the index of
+        // the image that we are allowed to draw upon.
+        //
+        // This function can block if no image is available. The parameter is an optional
+        // timeout after which the function call will return an error.
+        let (image_index, mut suboptimal, acquire_future) =
+            match acquire_next_image(swapchain.clone(), None).map_err(Validated::unwrap) {
+                Ok(r) => r,
+                Err(VulkanError::OutOfDate) => {
+                    return Ok(PassResult::SwapchainOutOfDate);
+                }
+                Err(e) => {
+                    return Err(Box::new(e));
+                }
+            };
+
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             queue.queue_family_index(),
-            CommandBufferUsage::MultipleSubmit,
-        )
-        .unwrap();
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        builder
+            // Before we can draw, we have to *enter a render pass*.
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    // A list of values to clear the attachments with. This list contains
+                    // one item for each attachment in the render pass. In this case, there
+                    // is only one attachment, and we clear it with a blue color.
+                    //
+                    // Only attachments that have `AttachmentLoadOp::Clear` are provided
+                    // with clear values, any others should use `None` as the clear value.
+                    clear_values: vec![Some([0.0, 0.0, 1.0, 1.0].into())],
+
+                    ..RenderPassBeginInfo::framebuffer(
+                        self.framebuffers[image_index as usize].clone(),
+                    )
+                },
+                SubpassBeginInfo {
+                    // The contents of the first (and only) subpass. This can be either
+                    // `Inline` or `SecondaryCommandBuffers`. The latter is a bit more
+                    // advanced and is not covered here.
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )?
+            // We are now inside the first subpass of the render pass.
+            .set_viewport(0, [self.viewport.clone()].into_iter().collect())?
+            .bind_pipeline_graphics(self.pipeline.clone())?
+            .bind_vertex_buffers(0, self.subbuffers.vertex_buffer.clone())?;
 
         // BEGIN RENDER PASS
+
+        unsafe { builder.draw(self.subbuffers.vertex_buffer.len() as u32, 1, 0, 0) }?;
+
+        // END RENDER PASS
+
+        builder.end_render_pass(SubpassEndInfo::default())?;
+
+        let command_buffer = builder.build()?;
+
+        let future = self
+            .previous_frame_end
+            .take()
+            .unwrap()
+            .join(acquire_future)
+            .then_execute(queue.clone(), command_buffer)?
+            // The color output is now expected to contain our triangle. But in order to
+            // show it on the screen, we have to *present* the image by calling
+            // `then_swapchain_present`.
+            //
+            // This function does not actually present the image immediately. Instead it
+            // submits a present command at the end of the queue. This means that it will
+            // only be presented once the GPU has finished executing the command buffer
+            // that draws the triangle.
+            .then_swapchain_present(
+                queue.clone(),
+                SwapchainPresentInfo::swapchain_image_index(swapchain.clone(), image_index),
+            )
+            .then_signal_fence_and_flush();
+
+        match future.map_err(Validated::unwrap) {
+            Ok(future) => {
+                self.previous_frame_end = Some(future.boxed());
+            }
+            Err(VulkanError::OutOfDate) => {
+                suboptimal = true;
+                self.previous_frame_end = Some(sync::now(device.clone()).boxed());
+            }
+            Err(e) => {
+                self.previous_frame_end = Some(sync::now(device.clone()).boxed());
+                return Err(Box::new(e));
+            }
+        }
+
+        Ok(if suboptimal {
+            PassResult::SwapchainOutOfDate
+        } else {
+            PassResult::Success
+        })
     }
 }
+
+pub enum PassResult {
+    Success,
+    SwapchainOutOfDate,
+}
+
 /// This function is called once during initialization, then again whenever the window is resized.
 fn window_size_dependent_setup(
     images: &[Arc<Image>],
