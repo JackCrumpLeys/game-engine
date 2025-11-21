@@ -10,7 +10,8 @@ use vulkano::{
     VulkanLibrary,
     buffer::{Buffer, BufferContents},
     device::{
-        Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
+        Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo,
+        QueueFlags,
         physical::{PhysicalDevice, PhysicalDeviceType},
     },
     format::Format,
@@ -115,6 +116,7 @@ impl ApplicationHandler for RenderManager {
 
         // --- Instance Creation ---
         let library = VulkanLibrary::new().expect("no local Vulkan library/DLL");
+        log::debug!("Vulkan api ver = {}", library.api_version());
         let instance = Instance::new(
             library,
             InstanceCreateInfo {
@@ -174,6 +176,11 @@ impl ApplicationHandler for RenderManager {
                 }],
                 enabled_extensions: DeviceExtensions {
                     khr_swapchain: true,
+                    khr_vulkan_memory_model: true,
+                    ..Default::default()
+                },
+                enabled_features: DeviceFeatures {
+                    vulkan_memory_model: true,
                     ..Default::default()
                 },
                 ..Default::default()

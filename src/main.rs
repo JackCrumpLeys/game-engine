@@ -1,3 +1,5 @@
+#![feature(duration_constructors_lite)]
+
 use std::{
     error::Error,
     time::{Duration, UNIX_EPOCH},
@@ -6,6 +8,7 @@ use std::{
 use game_engine::GameApp;
 use game_engine::render::components::{Position, Renderable};
 use winit::event_loop::{ControlFlow, EventLoop};
+
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Configure logger at runtime

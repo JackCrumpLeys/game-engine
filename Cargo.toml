@@ -11,12 +11,37 @@ log = "0.4.28"
 vulkano = "0.35.2"
 vulkano-shaders = "0.35.0"
 winit = "0.30.12"
-game_engine_derive.workspace = true
 rand = "0.9.2"
+game_engine_derive.workspace = true
+game_engine_shaders_types.workspace = true
+
+[build-dependencies]
+spirv-builder.workspace = true
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+incremental = true
 
 [workspace]
 resolver = "3"
-members = ["game_engine_derive"]
+members = ["crates/*"]
 
 [workspace.dependencies]
-game_engine_derive = { path = "game_engine_derive" }
+game_engine_derive = { path = "crates/game_engine_derive" }
+game_engine_shaders = { path = "crates/game_engine_shaders" }
+game_engine_shaders_types = { path = "crates/game_engine_shaders_types" }
+
+bytemuck = { version = "1.24.0", features = ["derive"] }
+
+[workspace.dependencies.spirv-builder]
+git = "https://github.com/Rust-GPU/rust-gpu.git"
+rev = "b3eda4df9814b6176d3c0844eb67f70a22ebb378"
+package = "spirv-builder"
+
+[workspace.dependencies.spirv-std]
+git = "https://github.com/Rust-GPU/rust-gpu.git"
+rev = "b3eda4df9814b6176d3c0844eb67f70a22ebb378"
+package = "spirv-std"
+features = ["bytemuck"]

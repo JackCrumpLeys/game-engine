@@ -1,3 +1,5 @@
+#![feature(duration_constructors_lite)]
+
 pub mod ecs;
 pub mod render;
 
@@ -42,11 +44,11 @@ impl GameApp {
         event_loop.set_control_flow(ControlFlow::Poll);
         let mut i = 0;
         loop {
-            i += 1;
-            if i % 20 == 0 {
-                self.update()?;
-                self.update_render_world()?;
-            }
+            // i += 1;
+            // if i % 20 == 0 {
+            self.update()?;
+            self.update_render_world()?;
+            // }
             match event_loop
                 .pump_app_events(Some(Duration::from_millis(5)), &mut self.render_manager)
             {

@@ -137,8 +137,7 @@ impl SnapshotPair {
             1.0
         } else {
             let raw_factor = duration_since_new.as_secs_f32() / old_to_new_duration.as_secs_f32();
-            (raw_factor * 0.9).clamp(0.0, 1.0) // If sim logic takes top long we have a
-            // lil wiggle room
+            raw_factor.clamp(0.0, 1.0)
         };
 
         self.old.interpolate(&self.new, factor)

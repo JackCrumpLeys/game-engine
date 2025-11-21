@@ -1,0 +1,11 @@
+[package]
+name = "game_engine_shaders"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+game_engine_shaders_types.workspace = true
+spirv-std.workspace = true
+
+[lib]
+crate-type = ["dylib"]
