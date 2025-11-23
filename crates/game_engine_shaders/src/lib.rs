@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+#![allow(unused_imports)]
 #![no_std]
 
 use core::f32::consts::PI;

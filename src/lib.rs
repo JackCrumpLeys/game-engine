@@ -41,7 +41,6 @@ impl GameApp {
 
         // Continuously runs the event loop, ideal for games.
         event_loop.set_control_flow(ControlFlow::Poll);
-        let i = 0;
         loop {
             // i += 1;
             // if i % 20 == 0 {

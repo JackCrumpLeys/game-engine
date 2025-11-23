@@ -288,18 +288,12 @@ mod tests {
 
                 assert!(
                     delta_pos < panic_threshold,
-                    "JUMP DETECTED at frame {}! \n\
-                    Time Delta: {:.4}s \n\
-                    Moved: {:.4} units \n\
-                    Expected: {:.4} units \n\
-                    Sim Pos: {:.4} \n\
-                    Render Pos: {:.4}",
-                    i,
-                    delta_time,
-                    delta_pos,
-                    expected_move,
-                    current_sim_pos,
-                    current_render_pos
+                    "JUMP DETECTED at frame {i}! \n\
+                    Time Delta: {delta_time:.4}s \n\
+                    Moved: {delta_pos:.4} units \n\
+                    Expected: {expected_move:.4} units \n\
+                    Sim Pos: {current_sim_pos:.4} \n\
+                    Render Pos: {current_render_pos:.4}"
                 );
             }
 

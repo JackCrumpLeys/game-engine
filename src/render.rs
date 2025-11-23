@@ -29,7 +29,7 @@ use crate::{
     GameEngineResult,
     ecs::World,
     render::{
-        packet::{Interpolate, RenderPacket, SnapshotPair},
+        packet::{RenderPacket, SnapshotPair},
         pass::PassManager,
     },
 };
@@ -40,14 +40,15 @@ pub struct RenderManager {
     snapshot_pair: Option<SnapshotPair>,
 }
 
+#[allow(dead_code)] // TODO: Remove when more fields are used
 struct RenderContext {
     pass_manager: PassManager,
     instance: Arc<Instance>,
     physical_device: Arc<PhysicalDevice>,
+    surface: Arc<Surface>,
     window: Arc<Window>,
     device: Arc<Device>,
     queue: Arc<Queue>,
-    surface: Arc<Surface>,
     swapchain: Arc<Swapchain>,
     swapchain_images: Vec<Arc<Image>>,
 }
@@ -216,9 +217,7 @@ impl ApplicationHandler for RenderManager {
             .find(|&mode| mode == PresentMode::Fifo)
             .unwrap_or(PresentMode::Fifo);
 
-        log::info!(
-            "Selected image format: {image_format:?}, present mode: {present_mode:?}"
-        );
+        log::info!("Selected image format: {image_format:?}, present mode: {present_mode:?}");
 
         // --- Swapchain Creation ---
         let (swapchain, images) = Swapchain::new(

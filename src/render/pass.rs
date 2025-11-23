@@ -55,7 +55,7 @@ impl PassManager {
     pub fn new(
         device: Arc<Device>,
         swapchain: Arc<Swapchain>,
-        images: &Vec<Arc<Image>>,
+        images: &[Arc<Image>],
         window: Arc<Window>,
     ) -> GameEngineResult<Self> {
         // The next step is to create a *render pass*, which is an object that describes where the
@@ -240,7 +240,7 @@ impl PassManager {
         })
     }
 
-    pub fn resize(&mut self, images: &Vec<Arc<Image>>) {
+    pub fn resize(&mut self, images: &[Arc<Image>]) {
         self.framebuffers = window_size_dependent_setup(images, &self.render_pass);
     }
 
