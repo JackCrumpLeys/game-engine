@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use vulkano::{
     VulkanLibrary,
-    buffer::{Buffer, BufferContents},
     device::{
         Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo,
         QueueFlags,
@@ -17,12 +16,10 @@ use vulkano::{
     format::Format,
     image::Image,
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
-    pipeline::graphics::vertex_input::Vertex,
     swapchain::{PresentMode, Surface, Swapchain, SwapchainCreateInfo},
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::Position,
     event::WindowEvent,
     event_loop::ActiveEventLoop,
     window::{Window, WindowId},
@@ -32,7 +29,6 @@ use crate::{
     GameEngineResult,
     ecs::World,
     render::{
-        components::Renderable,
         packet::{Interpolate, RenderPacket, SnapshotPair},
         pass::PassManager,
     },
@@ -54,6 +50,12 @@ struct RenderContext {
     surface: Arc<Surface>,
     swapchain: Arc<Swapchain>,
     swapchain_images: Vec<Arc<Image>>,
+}
+
+impl Default for RenderManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RenderManager {
@@ -212,12 +214,10 @@ impl ApplicationHandler for RenderManager {
             .expect("Failed to get present modes")
             .into_iter()
             .find(|&mode| mode == PresentMode::Fifo)
-            .unwrap_or_else(|| PresentMode::Fifo);
+            .unwrap_or(PresentMode::Fifo);
 
         log::info!(
-            "Selected image format: {:?}, present mode: {:?}",
-            image_format,
-            present_mode
+            "Selected image format: {image_format:?}, present mode: {present_mode:?}"
         );
 
         // --- Swapchain Creation ---
@@ -300,7 +300,7 @@ impl ApplicationHandler for RenderManager {
                                         self.recreate_swapchain();
                                     }
                                 },
-                                Err(e) => log::error!("Rendering error: {:?}", e),
+                                Err(e) => log::error!("Rendering error: {e:?}"),
                             }
                         } else {
                             log::warn!("No snapshot pair available for rendering");

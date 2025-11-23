@@ -11,6 +11,12 @@ pub struct World {
     next_entity_id: u64,
 }
 
+impl Default for World {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl World {
     pub fn new() -> Self {
         World {

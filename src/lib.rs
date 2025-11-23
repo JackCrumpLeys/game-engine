@@ -13,7 +13,6 @@ use winit::{
 
 use crate::render::{
     RenderManager,
-    components::{Position, Renderable},
     packet::{RenderPacket, VulVertex},
 };
 
@@ -42,7 +41,7 @@ impl GameApp {
 
         // Continuously runs the event loop, ideal for games.
         event_loop.set_control_flow(ControlFlow::Poll);
-        let mut i = 0;
+        let i = 0;
         loop {
             // i += 1;
             // if i % 20 == 0 {

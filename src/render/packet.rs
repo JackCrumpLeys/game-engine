@@ -8,6 +8,12 @@ pub struct RenderPacket {
     vertex_buffer: [VulVertex; 3],
 }
 
+impl Default for RenderPacket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RenderPacket {
     pub fn new() -> Self {
         Self {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use game_engine_shaders_types::PushConstants;
 use vulkano::buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo};
-use vulkano::buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer};
+use vulkano::buffer::{BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 /// Manegement of rendering passes
 use vulkano::command_buffer::{
@@ -13,7 +13,7 @@ use vulkano::command_buffer::{
 use vulkano::device::{Device, Queue};
 use vulkano::image::Image;
 use vulkano::image::view::ImageView;
-use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
+use vulkano::memory::allocator::{MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
 use vulkano::pipeline::graphics::color_blend::{ColorBlendAttachmentState, ColorBlendState};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
@@ -21,7 +21,7 @@ use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::rasterization::RasterizationState;
 use vulkano::pipeline::graphics::vertex_input::{Vertex, VertexDefinition};
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
-use vulkano::pipeline::layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayoutCreateInfo};
+use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{
     DynamicState, GraphicsPipeline, Pipeline, PipelineLayout, PipelineShaderStageCreateInfo,
 };
@@ -29,7 +29,7 @@ use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpa
 use vulkano::swapchain::{Swapchain, SwapchainPresentInfo, acquire_next_image};
 use vulkano::sync::{self, GpuFuture};
 use vulkano::{Validated, VulkanError};
-use winit::window::{self, Window};
+use winit::window::Window;
 
 use crate::GameEngineResult;
 use crate::render::packet::{RenderPacket, VulVertex};
@@ -97,7 +97,7 @@ impl PassManager {
         //
         // Since we need to draw to multiple images, we are going to create a different framebuffer
         // for each image.
-        let framebuffers = window_size_dependent_setup(&images, &render_pass);
+        let framebuffers = window_size_dependent_setup(images, &render_pass);
 
         // print!(env!("game_engine_shaders.spv"));
 
@@ -241,7 +241,7 @@ impl PassManager {
     }
 
     pub fn resize(&mut self, images: &Vec<Arc<Image>>) {
-        self.framebuffers = window_size_dependent_setup(&images, &self.render_pass);
+        self.framebuffers = window_size_dependent_setup(images, &self.render_pass);
     }
 
     pub fn load_packet(&mut self, packet: &RenderPacket) {
@@ -314,7 +314,7 @@ impl PassManager {
                 PushConstants {
                     position_offset: [0.0, 0.0].into(),
                     resolution: window_size.into(),
-                    time: time,
+                    time,
                 },
             )?
             // Before we can draw, we have to *enter a render pass*.

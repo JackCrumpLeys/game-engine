@@ -7,7 +7,6 @@ use std::{
 
 use game_engine::GameApp;
 use game_engine::render::components::{Position, Renderable};
-use winit::event_loop::{ControlFlow, EventLoop};
 
 
 fn main() -> Result<(), Box<dyn Error>> {
