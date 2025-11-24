@@ -1,3 +1,12 @@
+mod archetype;
+mod borrow;
+mod bundle;
+mod component;
+mod entity;
+mod query;
+mod storage;
+mod world;
+
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
