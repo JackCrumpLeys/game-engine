@@ -1,11 +1,10 @@
 #![feature(duration_constructors_lite)]
 
-pub mod ecs;
 pub mod render;
 
 use std::time::Duration;
 
-use ecs::World;
+use game_engine_ecs::world::World;
 use winit::{
     event_loop::{ControlFlow, EventLoop},
     platform::pump_events::EventLoopExtPumpEvents,

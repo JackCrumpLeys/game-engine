@@ -1,8 +1,7 @@
 use std::alloc::{self, Layout};
-use std::mem;
 use std::ptr::{self, NonNull, drop_in_place};
 
-use crate::ecs::borrow::AtomicBorrow;
+use crate::borrow::AtomicBorrow;
 
 pub struct Column {
     ptr: NonNull<u8>,
@@ -20,7 +19,7 @@ impl Column {
 
         Column {
             ptr: Layout::from_size_align(0, layout.align())
-                .map(|l| NonNull::dangling())
+                .map(|_| NonNull::dangling())
                 .unwrap(),
             len: 0,
             capacity: 0,
@@ -246,9 +245,7 @@ mod tests {
         assert_eq!(col.mutated_ticks[..col.len], vec![1, 2, 3]);
 
         // Remove index 1
-        unsafe {
-            col.swap_remove(1);
-        }
+        col.swap_remove(1);
 
         assert_eq!(col.len, 2);
         assert_eq!(col.mutated_ticks[..col.len], vec![1, 3]);

@@ -1,5 +1,5 @@
 use std::alloc::Layout;
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 use std::collections::HashMap;
 
 /// A unique index assigned to a component type.
@@ -26,6 +26,12 @@ pub struct ComponentRegistry {
     components: Vec<ComponentMeta>,
 }
 
+impl Default for ComponentRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ComponentRegistry {
     pub fn new() -> Self {
         ComponentRegistry {
@@ -37,20 +43,17 @@ impl ComponentRegistry {
     /// Registers a type T. If it already exists, returns the existing ID.
     /// If it's new, assigns a new ID and stores the Layout/Name.
     pub fn register<T: Component>(&mut self) -> ComponentId {
-        self.type_to_id
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| {
-                let name = std::any::type_name::<T>();
-                let layout = std::alloc::Layout::new::<T>();
+        *self.type_to_id.entry(TypeId::of::<T>()).or_insert_with(|| {
+            let name = std::any::type_name::<T>();
+            let layout = std::alloc::Layout::new::<T>();
 
-                let id = ComponentId(self.components.len());
+            let id = ComponentId(self.components.len());
 
-                let meta = ComponentMeta { name, layout };
-                self.components.push(meta);
+            let meta = ComponentMeta { name, layout };
+            self.components.push(meta);
 
-                id
-            })
-            .clone()
+            id
+        })
     }
 
     pub fn get_id<T: Component>(&self) -> Option<ComponentId> {
@@ -58,7 +61,7 @@ impl ComponentRegistry {
     }
 
     pub fn get_meta(&self, id: ComponentId) -> Option<&ComponentMeta> {
-        self.components.get(id.0 as usize)
+        self.components.get(id.0)
     }
 }
 
@@ -67,6 +70,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(dead_code)]
     fn test_component_registry() {
         let mut registry = ComponentRegistry::new();
 
@@ -86,14 +90,14 @@ mod tests {
         let pos_meta = registry.get_meta(pos_id).unwrap();
         assert_eq!(
             pos_meta.name,
-            "game_engine::ecs::component::tests::test_component_registry::Position"
+            "game_engine_ecs::component::tests::test_component_registry::Position"
         );
         assert_eq!(pos_meta.layout.size(), std::mem::size_of::<Position>());
 
         let vel_meta = registry.get_meta(vel_id).unwrap();
         assert_eq!(
             vel_meta.name,
-            "game_engine::ecs::component::tests::test_component_registry::Velocity"
+            "game_engine_ecs::component::tests::test_component_registry::Velocity"
         );
         assert_eq!(vel_meta.layout.size(), std::mem::size_of::<Velocity>());
     }

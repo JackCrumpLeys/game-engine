@@ -1,13 +1,10 @@
 #![feature(duration_constructors_lite)]
-
 use std::{
     error::Error,
     time::{Duration, UNIX_EPOCH},
 };
 
 use game_engine::GameApp;
-use game_engine::render::components::{Position, Renderable};
-
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Configure logger at runtime
@@ -23,7 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ))
         })
         // Add blanket level filter -
-        .level(log::LevelFilter::Trace)
+        .level(log::LevelFilter::Debug)
         // Output to stdout, files, and other Dispatch configurations
         .chain(std::io::stdout())
         .chain(fern::log_file("output.log")?)
@@ -32,18 +29,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut app = GameApp::default();
 
-    let world = app.world_mut();
-
-    // --- Test Scene in ECS ---
-    let entity1 = world.spawn_entity();
-    world.add_component(entity1, Position { x: 0.0, y: 0.0 });
-    world.add_component(entity1, Renderable { mesh_id: 1 });
-    let entity2 = world.spawn_entity();
-    world.add_component(entity2, Position { x: 10.0, y: 5.0 });
-    let entity3 = world.spawn_entity();
-    world.add_component(entity3, Position { x: -5.0, y: 2.0 });
-    world.add_component(entity3, Renderable { mesh_id: 2 });
-
     app.run()?;
 
     Ok(())
@@ -51,7 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn get_time() -> String {
     let time = std::time::SystemTime::now()
-        .checked_add(Duration::from_hours(13))
+        .checked_add(Duration::from_hours(13)) // NZST offset
         .unwrap()
         .duration_since(UNIX_EPOCH)
         .unwrap();

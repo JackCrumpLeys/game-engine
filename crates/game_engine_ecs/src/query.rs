@@ -1,8 +1,8 @@
-use crate::ecs::archetype::{Archetype, ArchetypeId};
-use crate::ecs::borrow::AtomicBorrow;
-use crate::ecs::component::{Component, ComponentId, ComponentRegistry};
-use crate::ecs::storage::Column;
-use crate::ecs::world::World;
+use crate::archetype::{Archetype, ArchetypeId};
+use crate::borrow::AtomicBorrow;
+use crate::component::{Component, ComponentId, ComponentRegistry};
+use crate::entity::Entity;
+use crate::world::World;
 
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -195,7 +195,7 @@ impl<'a, T: Component> View<'a> for &'a mut T {
         // The Column Must make sure that the ptr is valid for T.
         // And the ticks pointer must be pointing to a valid u32 array. parrallel to data.
         let ptr = column.get_ptr(0) as *mut T;
-        let ticks_ptr = column.get_ticks_ptr() as *mut u32;
+        let ticks_ptr = column.get_ticks_ptr();
         Some(WriteFetch {
             ptr: unsafe { NonNull::new_unchecked(ptr) },
             borrow: column.borrow_state(),
@@ -297,7 +297,7 @@ impl<Q: QueryToken, F: Filter> Query<Q, F> {
     pub fn get<'a>(
         &'a mut self,
         world: &'a mut World,
-        entity: crate::ecs::entity::Entity,
+        entity: Entity,
     ) -> Option<<Q::View<'a> as View<'a>>::Item> {
         // 1. O(1) Lookup
         let location = world.entity_location(entity)?;
@@ -590,7 +590,7 @@ impl_all_tuples!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecs::world::World;
+    use crate::world::World;
 
     #[test]
     fn test_query_iteration() {
@@ -606,7 +606,7 @@ mod tests {
         for (pos, vel) in query.iter(&mut world) {
             *vel += 1.0;
             count += 1;
-            println!("Pos: {}, Vel: {}", pos, vel);
+            println!("Pos: {pos}, Vel: {vel}");
         }
 
         assert_eq!(count, 2);
@@ -785,7 +785,7 @@ mod tests {
         // Query: Give me u32. Must have f32. Must NOT have bool.
         let mut query = Query::<&u32, (With<f32>, Without<bool>)>::new(&mut world.registry);
 
-        let results: Vec<u32> = query.iter(&mut world).map(|x| *x).collect();
+        let results: Vec<u32> = query.iter(&mut world).copied().collect();
 
         // Should match 20 and 40.
         assert_eq!(results.len(), 2);

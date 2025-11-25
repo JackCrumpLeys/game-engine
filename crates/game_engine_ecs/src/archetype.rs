@@ -1,6 +1,6 @@
-use crate::ecs::component::{ComponentId, ComponentRegistry};
-use crate::ecs::entity::Entity;
-use crate::ecs::storage::Column;
+use crate::component::{ComponentId, ComponentRegistry};
+use crate::entity::Entity;
+use crate::storage::Column;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -29,7 +29,7 @@ impl Archetype {
                     if let Some(meta) = registry.get_meta(comp_id) {
                         cols.insert(comp_id, Column::new(meta.layout));
                     } else {
-                        panic!("ComponentId {:?} not found in registry", comp_id);
+                        panic!("ComponentId {comp_id:?} not found in registry");
                     }
                 }
                 cols
@@ -96,7 +96,7 @@ impl Archetype {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecs::component::{ComponentId, ComponentRegistry};
+    use crate::component::ComponentRegistry;
 
     #[test]
     fn test_archetype_ops() {

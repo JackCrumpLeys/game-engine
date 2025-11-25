@@ -6,6 +6,7 @@ mod pass;
 
 use std::sync::Arc;
 
+use game_engine_ecs::world::World;
 use vulkano::{
     VulkanLibrary,
     device::{
@@ -27,7 +28,6 @@ use winit::{
 
 use crate::{
     GameEngineResult,
-    ecs::World,
     render::{
         packet::{RenderPacket, SnapshotPair},
         pass::PassManager,

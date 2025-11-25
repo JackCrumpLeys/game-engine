@@ -1,4 +1,4 @@
-use crate::ecs::borrow::AtomicBorrow;
+use crate::borrow::AtomicBorrow;
 use std::any::{Any, TypeId, type_name};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
@@ -61,7 +61,7 @@ impl Resources {
 
     /// Gets an immutable reference to a resource of type R.
     /// panics if the resource is already mutably borrowed.
-    pub fn get<R: Resource>(&self) -> Option<Res<R>> {
+    pub fn get<R: Resource>(&'_ self) -> Option<Res<'_, R>> {
         // 1. Look up cell
         // 2. Try borrow.borrow() -> Panic if fails (or return None? Bevy panics on contention)
         // 3. Construct Res wrapper
@@ -85,7 +85,7 @@ impl Resources {
 
     /// Gets a mutable reference to a resource of type R.
     /// panics if the resource is already borrowed.
-    pub fn get_mut<R: Resource>(&self) -> Option<ResMut<R>> {
+    pub fn get_mut<R: Resource>(&'_ self) -> Option<ResMut<'_, R>> {
         // 1. Look up cell
         // 2. Try borrow.borrow_mut()
         // 3. Construct ResMut wrapper
@@ -108,6 +108,12 @@ impl Resources {
                 borrow: &cell.borrow,
             }
         })
+    }
+}
+
+impl Default for Resources {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

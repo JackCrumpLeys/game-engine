@@ -1,9 +1,9 @@
-use crate::ecs::archetype::{Archetype, ArchetypeId};
-use crate::ecs::bundle::Bundle;
-use crate::ecs::component::{ComponentId, ComponentRegistry};
-use crate::ecs::entity::{Entities, Entity};
-use crate::ecs::query::{Filter, Query, QueryIter, QueryToken};
-use crate::ecs::resource::Resources;
+use crate::archetype::{Archetype, ArchetypeId};
+use crate::bundle::Bundle;
+use crate::component::{ComponentId, ComponentRegistry};
+use crate::entity::{Entities, Entity};
+use crate::query::{Filter, Query, QueryToken};
+use crate::resource::Resources;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug)]
@@ -89,7 +89,11 @@ impl World {
     }
 
     pub fn query<Q: QueryToken, F: Filter>(&mut self) -> Query<Q, F> {
-        return Query::new(&mut self.registry);
+        Query::new(&mut self.registry)
+    }
+
+    pub fn resources(&mut self) -> &mut Resources {
+        &mut self.resources
     }
 
     pub fn increment_tick(&mut self) {
@@ -124,14 +128,11 @@ impl World {
             .expect("Entity should have a location"); // this should always be Some if the entity
         // is alive
 
-        match self.archetypes[loc.archetype_id.0 as usize].swap_remove(loc.row) {
-            Some(moved) => {
-                let ent_loc = self.entity_index[moved.index() as usize]
-                    .as_mut()
-                    .expect("Moved entity should have a location");
-                ent_loc.row = loc.row;
-            }
-            None => {}
+        if let Some(moved) = self.archetypes[loc.archetype_id.0 as usize].swap_remove(loc.row) {
+            let ent_loc = self.entity_index[moved.index() as usize]
+                .as_mut()
+                .expect("Moved entity should have a location");
+            ent_loc.row = loc.row;
         };
 
         self.entities.free(entity);

@@ -1,5 +1,5 @@
-use crate::ecs::archetype::Archetype;
-use crate::ecs::component::{Component, ComponentId, ComponentRegistry};
+use crate::archetype::Archetype;
+use crate::component::{Component, ComponentId, ComponentRegistry};
 
 pub trait Bundle {
     /// Returns the list of component IDs in this bundle.
