@@ -1,4 +1,5 @@
 use std::alloc::{self, Layout};
+use std::mem;
 use std::ptr::{self, NonNull, drop_in_place};
 
 use crate::ecs::borrow::AtomicBorrow;
@@ -9,6 +10,7 @@ pub struct Column {
     capacity: usize,
     layout: Layout,
     borrow_state: AtomicBorrow,
+    mutated_ticks: Vec<u32>,
 }
 
 impl Column {
@@ -24,6 +26,7 @@ impl Column {
             capacity: 0,
             layout,
             borrow_state: AtomicBorrow::new(),
+            mutated_ticks: Vec::new(),
         }
     }
 
@@ -31,10 +34,10 @@ impl Column {
         &self.borrow_state
     }
 
-    /// Appends an element.
+    /// Appends an element at the given tick.
     /// # Safety
     /// The type T must match the Layout this column was created with.
-    pub unsafe fn push<T>(&mut self, value: T) {
+    pub unsafe fn push<T>(&mut self, value: T, tick: u32) {
         // 1. Check if (len == capacity) -> grow()
         // 2. Calculate byte offset: len * layout.size()
         // 3. ptr::write the value
@@ -52,6 +55,13 @@ impl Column {
             ptr::write(self.ptr.as_ptr().add(byte_offset) as *mut T, value);
         }
 
+        if self.mutated_ticks.len() < self.len + 1 {
+            self.mutated_ticks.push(tick);
+        } else {
+            // If we are reusing capacity, overwrite
+            self.mutated_ticks[self.len] = tick;
+        }
+
         self.len += 1;
     }
 
@@ -61,6 +71,10 @@ impl Column {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn get_ticks_ptr(&mut self) -> *mut u32 {
+        self.mutated_ticks.as_mut_ptr()
     }
 
     /// Returns a pointer to the element at index.
@@ -78,6 +92,7 @@ impl Column {
     /// Returns true if an element was actually moved (i.e. we didn't remove the very last one).
     /// panics if index is out of bounds.
     pub fn swap_remove(&mut self, index: usize) {
+        debug_assert!(self.len == self.mutated_ticks.len());
         assert!(index < self.len);
         // 1. If index is NOT the last element:
         //    Copy bits from (last_index) to (index)
@@ -100,6 +115,8 @@ impl Column {
                 drop_in_place(drop_ptr);
             }
         }
+
+        self.mutated_ticks.swap_remove(index);
         self.len -= 1;
     }
 
@@ -145,6 +162,8 @@ impl Drop for Column {
             return; // nothing to free
         }
 
+        debug_assert!(self.borrow_state.borrow_mut());
+
         for i in 0..self.len {
             // SAFETY: We are in Drop, so no other references exist.
             unsafe {
@@ -168,16 +187,15 @@ impl Drop for Column {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Put this in mod tests inside storage.rs
     #[test]
     fn test_column_push_and_get() {
         let layout = Layout::new::<u32>();
         let mut col = Column::new(layout);
 
         unsafe {
-            col.push(10u32);
-            col.push(20u32);
-            col.push(30u32);
+            col.push(10u32, 0);
+            col.push(20u32, 0);
+            col.push(30u32, 0);
         }
 
         assert_eq!(col.len, 3);
@@ -198,9 +216,9 @@ mod tests {
         let mut col = Column::new(layout);
 
         unsafe {
-            col.push(10u32); // idx 0
-            col.push(20u32); // idx 1
-            col.push(30u32); // idx 2
+            col.push(10u32, 0); // idx 0
+            col.push(20u32, 0); // idx 1
+            col.push(30u32, 0); // idx 2
 
             // Remove index 0. Element 30 should move to index 0.
             col.swap_remove(0);
@@ -211,5 +229,28 @@ mod tests {
         unsafe {
             assert_eq!(*p0, 30);
         }
+    }
+
+    // tick tests
+    #[test]
+    fn test_mutated_ticks() {
+        let layout = Layout::new::<u32>();
+        let mut col = Column::new(layout);
+
+        unsafe {
+            col.push(10u32, 1);
+            col.push(20u32, 2);
+            col.push(30u32, 3);
+        }
+
+        assert_eq!(col.mutated_ticks[..col.len], vec![1, 2, 3]);
+
+        // Remove index 1
+        unsafe {
+            col.swap_remove(1);
+        }
+
+        assert_eq!(col.len, 2);
+        assert_eq!(col.mutated_ticks[..col.len], vec![1, 3]);
     }
 }

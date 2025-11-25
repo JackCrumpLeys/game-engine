@@ -9,7 +9,7 @@ pub trait Bundle {
     /// Writes the bundle's data into the archetype at the given row.
     /// # Safety
     /// The archetype must contain columns for all components in this bundle.
-    unsafe fn put(self, archetype: &mut Archetype, registry: &ComponentRegistry);
+    unsafe fn put(self, archetype: &mut Archetype, registry: &ComponentRegistry, tick: u32);
 }
 
 // Macro to implement Bundle for tuples (A, B, C...)
@@ -21,14 +21,14 @@ macro_rules! impl_bundle {
             }
 
             #[allow(unused_variables)]
-            unsafe fn put(self, archetype: &mut Archetype, registry: &ComponentRegistry) {
+            unsafe fn put(self, archetype: &mut Archetype, registry: &ComponentRegistry, tick: u32) {
                 #[allow(non_snake_case)]
                 let ($($name,)*) = self;
                 unsafe {
                     $(
                         let id = registry.get_id::<$name>().expect("Component ID should exist");
                         let column = archetype.column(id).expect("Column should exist");
-                        column.push($name);
+                        column.push($name,tick);
                     )*
                 }
             }
@@ -41,7 +41,7 @@ impl Bundle for () {
         vec![]
     }
 
-    unsafe fn put(self, _archetype: &mut Archetype, _registry: &ComponentRegistry) {
+    unsafe fn put(self, _archetype: &mut Archetype, _registry: &ComponentRegistry, _tick: u32) {
         // noop
     }
 }

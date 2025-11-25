@@ -115,8 +115,8 @@ mod tests {
 
         // Manually push data to columns (simulating what World will do)
         unsafe {
-            arch.column(pos_id).unwrap().push(100u32);
-            arch.column(vel_id).unwrap().push(1.0f32);
+            arch.column(pos_id).unwrap().push(100u32, 0);
+            arch.column(vel_id).unwrap().push(1.0f32, 0);
         }
 
         assert_eq!(arch.len(), 1);

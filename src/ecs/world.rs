@@ -2,12 +2,24 @@ use crate::ecs::archetype::{Archetype, ArchetypeId};
 use crate::ecs::bundle::Bundle;
 use crate::ecs::component::{ComponentId, ComponentRegistry};
 use crate::ecs::entity::{Entities, Entity};
+use crate::ecs::query::{Filter, Query, QueryIter, QueryToken};
+use crate::ecs::resource::Resources;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug)]
-struct EntityLocation {
+pub struct EntityLocation {
     archetype_id: ArchetypeId,
     row: usize,
+}
+
+impl EntityLocation {
+    pub fn archetype_id(&self) -> ArchetypeId {
+        self.archetype_id
+    }
+
+    pub fn row(&self) -> usize {
+        self.row
+    }
 }
 
 pub struct World {
@@ -18,6 +30,8 @@ pub struct World {
     entity_index: Vec<Option<EntityLocation>>,
     // Maps Sorted Component IDs -> Archetype ID
     archetype_index: HashMap<Vec<ComponentId>, ArchetypeId>,
+    resources: Resources,
+    current_tick: u32,
 }
 
 impl Default for World {
@@ -34,6 +48,8 @@ impl World {
             archetypes: Vec::new(),
             entity_index: Vec::new(),
             archetype_index: HashMap::new(),
+            resources: Resources::new(),
+            current_tick: 1, // 0 can be special
         }
     }
 
@@ -55,7 +71,11 @@ impl World {
         // Implementors of Bundle must ensure they only write components that exist in the
         // archetype.
         unsafe {
-            bundle.put(&mut self.archetypes[arch_id.0 as usize], &self.registry);
+            bundle.put(
+                &mut self.archetypes[arch_id.0 as usize],
+                &self.registry,
+                self.current_tick,
+            );
         }
 
         self.entity_index.resize(ent.index() as usize + 1, None);
@@ -66,6 +86,24 @@ impl World {
         });
 
         ent
+    }
+
+    pub fn query<Q: QueryToken, F: Filter>(&mut self) -> Query<Q, F> {
+        return Query::new(&mut self.registry);
+    }
+
+    pub fn increment_tick(&mut self) {
+        self.current_tick = self.current_tick.wrapping_add(1);
+    }
+
+    /// Get the locarion of an entity in the world.
+    /// Renurns None if the entity is not alive.
+    pub fn entity_location(&self, entity: Entity) -> Option<EntityLocation> {
+        if !self.entities.is_alive(entity) {
+            return None;
+        }
+
+        self.entity_index[entity.index() as usize]
     }
 
     /// Despawns an entity. Returns true if it existed.
@@ -114,6 +152,12 @@ impl World {
         self.archetypes.push(archetype);
         self.archetype_index.insert(comp_ids, id);
         id
+    }
+
+    /// The system tick, increments every time `increment_tick` is called.
+    /// Used for change detection.
+    pub fn tick(&self) -> u32 {
+        self.current_tick
     }
 }
 

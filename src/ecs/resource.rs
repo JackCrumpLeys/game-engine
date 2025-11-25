@@ -1,0 +1,192 @@
+use crate::ecs::borrow::AtomicBorrow;
+use std::any::{Any, TypeId, type_name};
+use std::cell::UnsafeCell;
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
+
+// Marker trait, similar to Component but for globals
+pub trait Resource: 'static + Send + Sync {}
+impl<T: 'static + Send + Sync> Resource for T {}
+
+struct ResourceCell {
+    data: UnsafeCell<Box<dyn Any>>,
+    borrow: AtomicBorrow,
+}
+
+impl ResourceCell {
+    fn new(data: Box<dyn Any>) -> Self {
+        Self {
+            data: UnsafeCell::new(data),
+            borrow: AtomicBorrow::new(),
+        }
+    }
+}
+
+pub struct Resources {
+    map: HashMap<TypeId, ResourceCell>,
+}
+
+impl Resources {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    /// Inserts a resource of type R.
+    /// panics if a resource of this type is already borrowed.
+    pub fn insert<R: Resource>(&mut self, resource: R) {
+        // match self.map.get_mut(&TypeId::of::<R>()) {
+        //     Some(v) => {
+        //         if !v.borrow.borrow_mut() {
+        //             panic!(
+        //                 "Resource of this type is already borrowed, cannot insert new value. {}",
+        //                 type_name::<R>()
+        //             )
+        //         }
+        //
+        //         // Safety: We have exclusive access via borrow_mut
+        //         drop(unsafe { v.data.get() });
+        //
+        //         // Safety: We have exclusive access via borrow_mut
+        //         unsafe { *v.data.get() = Box::new(resource) };
+        //         v.borrow.release_mut();
+        //     }
+        //     None => {
+        self.map
+            .insert(TypeId::of::<R>(), ResourceCell::new(Box::new(resource)));
+        //     }
+        // }
+    }
+
+    /// Gets an immutable reference to a resource of type R.
+    /// panics if the resource is already mutably borrowed.
+    pub fn get<R: Resource>(&self) -> Option<Res<R>> {
+        // 1. Look up cell
+        // 2. Try borrow.borrow() -> Panic if fails (or return None? Bevy panics on contention)
+        // 3. Construct Res wrapper
+
+        self.map.get(&TypeId::of::<R>()).map(|cell| {
+            if !cell.borrow.borrow() {
+                panic!("Resource of this type is already mutably borrowed, cannot get immutable reference. {}", type_name::<R>());
+            }
+
+            // Safety: We have an immutable borrow, so it's safe to create an immutable reference.
+            let value = unsafe { &*cell.data.get() }
+                .downcast_ref::<R>()
+                .expect("Resource type mismatch");
+
+            Res {
+                value,
+                borrow: &cell.borrow,
+            }
+        })
+    }
+
+    /// Gets a mutable reference to a resource of type R.
+    /// panics if the resource is already borrowed.
+    pub fn get_mut<R: Resource>(&self) -> Option<ResMut<R>> {
+        // 1. Look up cell
+        // 2. Try borrow.borrow_mut()
+        // 3. Construct ResMut wrapper
+
+        self.map.get(&TypeId::of::<R>()).map(|cell| {
+            if !cell.borrow.borrow_mut() {
+                panic!(
+                    "Resource of this type is already borrowed, cannot get mutable reference. {}",
+                    type_name::<R>()
+                );
+            }
+
+            // Safety: We have a mutable borrow, so it's safe to create a mutable reference.
+            let value = unsafe { &mut *cell.data.get() }
+                .downcast_mut::<R>()
+                .expect("Resource type mismatch");
+
+            ResMut {
+                value,
+                borrow: &cell.borrow,
+            }
+        })
+    }
+}
+
+pub struct Res<'a, T: Resource> {
+    value: &'a T,
+    borrow: &'a AtomicBorrow,
+}
+
+impl<'a, T: Resource> Deref for Res<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<'a, T: Resource> Drop for Res<'a, T> {
+    fn drop(&mut self) {
+        self.borrow.release();
+    }
+}
+
+pub struct ResMut<'a, T: Resource> {
+    value: &'a mut T,
+    borrow: &'a AtomicBorrow,
+}
+
+impl<'a, T: Resource> Deref for ResMut<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<'a, T: Resource> DerefMut for ResMut<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value
+    }
+}
+
+impl<'a, T: Resource> Drop for ResMut<'a, T> {
+    fn drop(&mut self) {
+        self.borrow.release_mut();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_insert_and_get_resource() {
+        let mut resources = Resources::new();
+        resources.insert(42u32);
+
+        let res = resources.get::<u32>().unwrap();
+        assert_eq!(*res, 42);
+    }
+
+    #[test]
+    fn test_insert_and_get_mut_resource() {
+        let mut resources = Resources::new();
+        resources.insert(42u32);
+
+        {
+            let mut res_mut = resources.get_mut::<u32>().unwrap();
+            *res_mut = 100;
+        }
+
+        let res = resources.get::<u32>().unwrap();
+        assert_eq!(*res, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "Resource of this type is already borrowed")]
+    fn test_borrow_conflict() {
+        let mut resources = Resources::new();
+        resources.insert(42u32);
+
+        let _res1 = resources.get::<u32>().unwrap();
+        let _res2 = resources.get_mut::<u32>().unwrap(); // This should panic
+    }
+}
