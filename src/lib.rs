@@ -1,5 +1,3 @@
-#![feature(duration_constructors_lite)]
-
 pub mod render;
 
 use std::time::Duration;

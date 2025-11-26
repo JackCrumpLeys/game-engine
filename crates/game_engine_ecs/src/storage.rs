@@ -12,15 +12,22 @@ pub struct Column {
     mutated_ticks: Vec<u32>,
 }
 
+const BASE_COL_LEN: usize = 64;
+
 impl Column {
     pub fn new(layout: Layout) -> Self {
         // Hint: Layout::from_size_align(0, layout.align()) is useful for
         // creating a dangling pointer for an empty vector.
 
         Column {
-            ptr: Layout::from_size_align(0, layout.align())
-                .map(|_| NonNull::dangling())
-                .unwrap(),
+            ptr: if layout.size() > 0 {
+                Layout::from_size_align(0, layout.align())
+                    .map(|_| NonNull::dangling())
+                    .unwrap()
+            } else {
+                // For ZST, simple dangling pointer
+                NonNull::dangling()
+            },
             len: 0,
             capacity: 0,
             layout,
@@ -47,11 +54,17 @@ impl Column {
             self.grow();
         }
 
-        let byte_offset = self.len * self.layout.size();
+        if self.layout.size() == 0 {
+            // For ZSTs, we must still "forget" the value so its Drop doesn't run
+            // (though ZSTs usually don't have Drop, they theoretically can)
+            std::mem::forget(value);
+        } else {
+            let byte_offset = self.len * self.layout.size();
 
-        // Safety: Caller guarantees T matches layout.
-        unsafe {
-            ptr::write(self.ptr.as_ptr().add(byte_offset) as *mut T, value);
+            // Safety: Caller guarantees T matches layout.
+            unsafe {
+                ptr::write(self.ptr.as_ptr().add(byte_offset) as *mut T, value);
+            }
         }
 
         if self.mutated_ticks.len() < self.len + 1 {
@@ -72,6 +85,7 @@ impl Column {
         self.len
     }
 
+    /// Get a pointer to the mutated ticks array.
     pub fn get_ticks_ptr(&mut self) -> *mut u32 {
         self.mutated_ticks.as_mut_ptr()
     }
@@ -120,9 +134,15 @@ impl Column {
     }
 
     fn grow(&mut self) {
+        // If we have a zero-sized type, we don't need to allocate memory.
+        if self.layout.size() == 0 {
+            self.capacity = usize::MAX;
+            return;
+        }
+
         // Standard vector resizing logic using std::alloc::realloc
         self.capacity = if self.capacity == 0 {
-            4
+            BASE_COL_LEN
         } else {
             self.capacity * 2
         };
@@ -130,7 +150,7 @@ impl Column {
         // SAFETY: We ensure new_ptr is not null and properly aligned.
         unsafe {
             let new_size = self.capacity * self.layout.size();
-            let new_ptr = if self.capacity == 4 {
+            let new_ptr = if self.capacity == BASE_COL_LEN {
                 alloc::alloc(Layout::from_size_align(new_size, self.layout.align()).unwrap())
             } else {
                 alloc::realloc(
@@ -157,7 +177,7 @@ impl Column {
 
 impl Drop for Column {
     fn drop(&mut self) {
-        if self.capacity == 0 {
+        if self.capacity == 0 || self.layout.size() == 0 {
             return; // nothing to free
         }
 

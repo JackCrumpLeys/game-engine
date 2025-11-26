@@ -9,13 +9,15 @@ use std::ptr::NonNull;
 
 // ============================================================================
 // Internal Machinery (Fetch & View)
-//    These operate on specific lifetimes 'a during iteration.
 // ============================================================================
 
 /// Holds raw pointers to columns for a specific Archetype iteration.
+/// 'Current Indec' starts at 0
+/// 'cirrent index' exeeding length is undefined behavior.
 pub trait Fetch<'a> {
     type Item;
     /// Advances the fetch and returns the next item.
+    /// current index is advanced by 1.
     /// # Safety
     /// Caller must ensure current index < length.
     unsafe fn next(&mut self) -> Self::Item;
@@ -23,6 +25,15 @@ pub trait Fetch<'a> {
     /// # Safety
     /// Caller must ensure index < length.
     unsafe fn get(&mut self, index: usize) -> Self::Item;
+    /// Skips the given number of items.
+    /// Current index is advanced by count.
+    /// # Safety
+    /// Caller must ensure current index + count <= length.
+    unsafe fn skip(&mut self, count: usize) {
+        for _ in 0..count {
+            let _ = unsafe { self.next() };
+        }
+    }
 }
 
 /// A View defines how to access data from an Archetype for a specific lifetime 'a.
@@ -67,6 +78,13 @@ impl<'a, T: 'static> Fetch<'a> for ReadFetch<'a, T> {
     unsafe fn get(&mut self, index: usize) -> Self::Item {
         unsafe { &*self.ptr.as_ptr().add(index) }
     }
+
+    #[inline(always)]
+    unsafe fn skip(&mut self, count: usize) {
+        unsafe {
+            self.ptr = NonNull::new_unchecked(self.ptr.as_ptr().add(count));
+        }
+    }
 }
 
 // --- Write Implementation ---
@@ -85,7 +103,7 @@ impl<'a, T> Drop for WriteFetch<'a, T> {
 }
 
 impl<'a, T: 'static> Fetch<'a> for WriteFetch<'a, T> {
-    type Item = &'a mut T;
+    type Item = Mut<'a, T>;
 
     #[inline(always)]
     unsafe fn next(&mut self) -> Self::Item {
@@ -94,11 +112,15 @@ impl<'a, T: 'static> Fetch<'a> for WriteFetch<'a, T> {
             self.ptr = NonNull::new_unchecked(self.ptr.as_ptr().add(1));
 
             // mark as mutated this tick
-            *self.ticks.as_ptr() = self.current_tick;
+            // *self.ticks.as_ptr() = self.current_tick;
             // update tick pointer to point to next
             self.ticks = NonNull::new_unchecked(self.ticks.as_ptr().add(1));
 
-            ret
+            Mut {
+                value: ret,
+                tick_ptr: self.ticks.as_ptr().sub(1),
+                current_tick: self.current_tick,
+            }
         }
     }
 
@@ -108,10 +130,44 @@ impl<'a, T: 'static> Fetch<'a> for WriteFetch<'a, T> {
             let ret = &mut *self.ptr.as_ptr().add(index);
 
             // mark as mutated this tick
-            *self.ticks.as_ptr().add(index) = self.current_tick;
+            // *self.ticks.as_ptr().add(index) = self.current_tick;
 
-            ret
+            Mut {
+                value: ret,
+                tick_ptr: self.ticks.as_ptr().add(index),
+                current_tick: self.current_tick,
+            }
         }
+    }
+    #[inline(always)]
+    unsafe fn skip(&mut self, count: usize) {
+        unsafe {
+            self.ptr = NonNull::new_unchecked(self.ptr.as_ptr().add(count));
+        }
+    }
+}
+// The wrapper yielded by the iterator
+pub struct Mut<'a, T> {
+    pub(crate) value: &'a mut T,
+    pub(crate) tick_ptr: *mut u32,
+    pub(crate) current_tick: u32,
+}
+
+impl<'a, T> std::ops::Deref for Mut<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<'a, T> std::ops::DerefMut for Mut<'a, T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut T {
+        // ONLY update the tick when DerefMut is actually called
+        // SAFETY: tick_ptr is valid and points to a u32.
+        // This is guaranteed by the WriteFetch struct.
+        unsafe { *self.tick_ptr = self.current_tick };
+        self.value
     }
 }
 
@@ -167,15 +223,15 @@ impl<'a, T: Component> View<'a> for &'a T {
 
 // --- Impl for &'static mut T ---
 impl<T: Component> QueryToken for &'static mut T {
-    type View<'a> = &'a mut T;
+    type View<'a> = Mut<'a, T>;
 
     fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
         out.push(registry.register::<T>());
     }
 }
 
-impl<'a, T: Component> View<'a> for &'a mut T {
-    type Item = &'a mut T;
+impl<'a, T: Component> View<'a> for Mut<'a, T> {
+    type Item = Mut<'a, T>;
     type Fetch = WriteFetch<'a, T>;
 
     fn create_fetch(
@@ -279,7 +335,7 @@ impl<Q: QueryToken, F: Filter> Query<Q, F> {
         }
     }
 
-    pub fn iter<'a>(&'a mut self, world: &'a mut World) -> QueryIter<'a, Q::View<'a>> {
+    pub fn iter<'a>(&'a mut self, world: &'a mut World) -> QueryIter<'a, Q::View<'a>, F> {
         self.update_archetype_cache(world); // TODO: Optimize to only update when archetypes change
 
         QueryIter {
@@ -289,6 +345,7 @@ impl<Q: QueryToken, F: Filter> Query<Q, F> {
             current_fetch: None,
             current_len: 0,
             current_row: 0,
+            current_skip_filter: None,
         }
     }
 
@@ -336,23 +393,80 @@ impl<Q: QueryToken, F: Filter> Query<Q, F> {
         let mut fetch = Q::View::create_fetch(arch, &world.registry, world.tick())?;
         unsafe { Some(fetch.get(location.row())) }
     }
+
+    pub fn for_each<'a, Func>(&'a mut self, world: &'a mut World, mut func: Func)
+    where
+        Func: FnMut(<Q::View<'a> as View<'a>>::Item),
+    {
+        self.update_archetype_cache(world);
+
+        // Iterate Matched Archetypes
+        for &arch_id in &self.cached_archetypes {
+            // SAFETY: We iterate distinct archetypes.
+            // We use unsafe to get a mutable reference to the archetype
+            // while holding a mutable reference to the world.
+            // The borrow checker normally stops this, but we know archetypes are disjoint.
+            // Fetch/filter creation will handle column borrows safely.
+            let arch =
+                unsafe { &mut *(&mut world.archetypes[arch_id.0 as usize] as *mut Archetype) };
+            let arch2 =
+                unsafe { &mut *(&mut world.archetypes[arch_id.0 as usize] as *mut Archetype) };
+
+            let len = arch.len();
+            if len == 0 {
+                continue;
+            }
+
+            let mut current_skip_filter =
+                F::create_skip_filter(arch2, &world.registry, world.tick());
+
+            // Create the Fetch (Borrows happen here, ONCE per chunk)
+            // this should be some else the cache is invalid.
+            if let Some(mut fetch) = Q::View::create_fetch(arch, &world.registry, world.tick()) {
+                if let Some(skip_filter) = &mut current_skip_filter {
+                    for _ in 0..len {
+                        // Check if we should skip this row
+                        if skip_filter.should_skip() {
+                            // Advance fetch without calling func
+                            // Safety: fetch.next() is safe because we are within bounds 0..len
+                            unsafe { fetch.skip(1) }; // TODO: Jump ahead more efficiently
+                            continue; // Skip to next iteration
+                        }
+                        // SAFETY: fetch.next() is safe because we are within bounds 0..len
+                        unsafe {
+                            func(fetch.next());
+                        }
+                    }
+                } else {
+                    // The compiler sees a simple 0..len loop with no branches inside.
+                    for _ in 0..len {
+                        // SAFETY: fetch.next() is safe because we are within bounds 0..len
+                        unsafe {
+                            func(fetch.next());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
 // The Iterator
 // ============================================================================
 
-pub struct QueryIter<'a, V: View<'a>> {
+pub struct QueryIter<'a, V: View<'a>, F: Filter = ()> {
     world: &'a mut World,
     archetype_ids: &'a [ArchetypeId],
     current_arch_idx: usize,
 
     current_fetch: Option<V::Fetch>,
+    current_skip_filter: Option<F::SkipFilter<'a>>,
     current_len: usize,
     current_row: usize,
 }
 
-impl<'a, V: View<'a>> Iterator for QueryIter<'a, V> {
+impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
     type Item = V::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -362,6 +476,14 @@ impl<'a, V: View<'a>> Iterator for QueryIter<'a, V> {
                 && self.current_row < self.current_len
             {
                 self.current_row += 1;
+
+                if let Some(skip_filter) = &mut self.current_skip_filter {
+                    // Check if we should skip this row
+                    if skip_filter.should_skip() {
+                        unsafe { fetch.skip(1) }; // Advance fetch without returning item
+                        continue; // Skip to next iteration
+                    }
+                }
 
                 // SAFETY: We have verified that current_row < current_len
                 return Some(unsafe { fetch.next() });
@@ -376,11 +498,14 @@ impl<'a, V: View<'a>> Iterator for QueryIter<'a, V> {
             let arch_id = self.archetype_ids[self.current_arch_idx];
             self.current_arch_idx += 1;
 
-            // Borrow Archetype mutably
+            // Borrow Archetype mutably twice
             // SAFETY: We access distinct archetypes sequentially.
             // Creating the fetch will borrow columns as needed using the runtime AtomicBorrow.
             // we need to do this unsafe trick to get a mutable reference from a shared one.
+            // Creating the filter MAY also borrow columns similarly.
             let arch =
+                unsafe { &mut *(&mut self.world.archetypes[arch_id.0 as usize] as *mut Archetype) };
+            let arch2 =
                 unsafe { &mut *(&mut self.world.archetypes[arch_id.0 as usize] as *mut Archetype) };
 
             if arch.len() == 0 {
@@ -390,6 +515,8 @@ impl<'a, V: View<'a>> Iterator for QueryIter<'a, V> {
             self.current_len = arch.len();
             self.current_row = 0;
             self.current_fetch = V::create_fetch(arch, &self.world.registry, self.world.tick());
+            self.current_skip_filter =
+                F::create_skip_filter(arch2, &self.world.registry, self.world.tick());
         }
     }
 }
@@ -399,11 +526,33 @@ impl<'a, V: View<'a>> Iterator for QueryIter<'a, V> {
 // ============================================================================
 
 pub trait Filter: 'static {
+    type SkipFilter<'a>: SkipFilter = ();
+
     fn populate_requirements(
         registry: &mut ComponentRegistry,
         required: &mut Vec<ComponentId>,
         excluded: &mut Vec<ComponentId>,
     );
+
+    /// this constructs the SkipFilter for this archetype.
+    /// returns None if the skip filter does not need to be applie
+    fn create_skip_filter<'a>(
+        _archetype: &'a mut Archetype,
+        _registry: &ComponentRegistry,
+        _tick: u32,
+    ) -> Option<Self::SkipFilter<'a>> {
+        None
+    }
+}
+
+pub trait SkipFilter {
+    fn should_skip(&mut self) -> bool;
+}
+
+impl SkipFilter for () {
+    fn should_skip(&mut self) -> bool {
+        false
+    }
 }
 
 // Default filter: () -> Matches everything
@@ -443,6 +592,8 @@ impl<T: Component> Filter for Without<T> {
 // AND<T, U>: Combines two filters with AND logic
 pub struct And<T, U>(PhantomData<(T, U)>);
 impl<T: Filter, U: Filter> Filter for And<T, U> {
+    type SkipFilter<'a> = AndSkip<T::SkipFilter<'a>, U::SkipFilter<'a>>;
+
     fn populate_requirements(
         registry: &mut ComponentRegistry,
         required: &mut Vec<ComponentId>,
@@ -450,6 +601,95 @@ impl<T: Filter, U: Filter> Filter for And<T, U> {
     ) {
         T::populate_requirements(registry, required, excluded);
         U::populate_requirements(registry, required, excluded);
+    }
+
+    #[inline(always)]
+    fn create_skip_filter<'a>(
+        archetype: &'a mut Archetype,
+        registry: &ComponentRegistry,
+        tick: u32,
+    ) -> Option<Self::SkipFilter<'a>> {
+        // safety: The filters SHOULD check that they obey borrow rules. using
+        // AtomicBorrow.
+
+        let archetype_2 = unsafe { &mut *(&mut *archetype as *mut Archetype) };
+
+        let t_filter = T::create_skip_filter(archetype, registry, tick)?;
+        let u_filter = U::create_skip_filter(archetype_2, registry, tick)?;
+        Some(AndSkip(t_filter, u_filter))
+    }
+}
+
+pub struct AndSkip<T: SkipFilter, U: SkipFilter>(T, U);
+
+impl<T: SkipFilter, U: SkipFilter> SkipFilter for AndSkip<T, U> {
+    fn should_skip(&mut self) -> bool {
+        self.0.should_skip() || self.1.should_skip()
+    }
+}
+
+pub struct Changed<T>(PhantomData<T>);
+
+impl<T: Component> Filter for Changed<T> {
+    type SkipFilter<'a> = ChangedSkipFilter<'a, T>;
+
+    fn populate_requirements(
+        registry: &mut ComponentRegistry,
+        required: &mut Vec<ComponentId>,
+        _: &mut Vec<ComponentId>,
+    ) {
+        required.push(registry.register::<T>());
+    }
+
+    #[inline(always)]
+    fn create_skip_filter<'a>(
+        archetype: &'a mut Archetype,
+        registry: &ComponentRegistry,
+        tick: u32,
+    ) -> Option<Self::SkipFilter<'a>> {
+        let id = registry.get_id::<T>()?;
+        let column = archetype.column(id)?;
+
+        if !column.borrow_state().borrow() {
+            panic!(
+                "Immutable borrow failed for {}, you have a mutable borrow somwhere else",
+                std::any::type_name::<T>()
+            );
+        }
+
+        let ptr = column.get_ticks_ptr();
+
+        return Some(ChangedSkipFilter::<'a, T> {
+            change_tick: tick,
+            changed_ptr: ptr,
+            borrow: &column.borrow_state(),
+            _marker: PhantomData,
+        });
+    }
+}
+
+pub struct ChangedSkipFilter<'a, T> {
+    change_tick: u32,
+    changed_ptr: *const u32,
+    borrow: &'a AtomicBorrow,
+    _marker: PhantomData<T>,
+}
+
+impl<'a, T> Drop for ChangedSkipFilter<'a, T> {
+    fn drop(&mut self) {
+        self.borrow.release();
+    }
+}
+
+impl<'a, T> SkipFilter for ChangedSkipFilter<'a, T> {
+    #[inline(always)]
+    fn should_skip(&mut self) -> bool {
+        // SAFETY: changed_ptr is valid and points to a u32.
+        // This is guaranteed by the ChangedSkipFilter struct.
+        let last_changed = unsafe { *self.changed_ptr };
+        // SAFETY: Caller must ensure we only call this len times.
+        unsafe { self.changed_ptr = self.changed_ptr.add(1) };
+        last_changed < self.change_tick
     }
 }
 
@@ -603,10 +843,10 @@ mod tests {
         let mut query = Query::<(&u32, &mut f32)>::new(&mut world.registry);
 
         let mut count = 0;
-        for (pos, vel) in query.iter(&mut world) {
+        for (pos, mut vel) in query.iter(&mut world) {
             *vel += 1.0;
             count += 1;
-            println!("Pos: {pos}, Vel: {vel}");
+            println!("Pos: {pos}, Vel: {}", *vel);
         }
 
         assert_eq!(count, 2);
@@ -815,7 +1055,7 @@ mod tests {
         // System: Update Position based on Velocity
         {
             let mut query = Query::<(&mut Position, &Velocity)>::new(&mut world.registry);
-            for (pos, vel) in query.iter(&mut world) {
+            for (mut pos, vel) in query.iter(&mut world) {
                 pos.x += vel.dx;
                 pos.y += vel.dy;
             }
@@ -845,7 +1085,7 @@ mod tests {
 
         let mut found_names = Vec::new();
 
-        for (name, score) in query.iter(&mut world) {
+        for (name, mut score) in query.iter(&mut world) {
             found_names.push(name.0.clone());
             *score += 10;
         }
@@ -906,7 +1146,7 @@ mod tests {
         let mut query = Query::<(&u32, &mut f32)>::new(&mut world.registry);
 
         // Test get for matching entity
-        if let Some((pos, vel)) = query.get(&mut world, e1) {
+        if let Some((pos, mut vel)) = query.get(&mut world, e1) {
             assert_eq!(*pos, 10);
             *vel += 2.0;
             assert_eq!(*vel, 7.0);
@@ -921,7 +1161,6 @@ mod tests {
     #[test]
     fn test_query_get_nonexistent_entity() {
         let mut world = World::new();
-
         let e1 = world.spawn((10u32, 5.0f32));
 
         let mut query = Query::<(&u32, &mut f32)>::new(&mut world.registry);
@@ -931,5 +1170,43 @@ mod tests {
 
         // Test get for despawned entity
         assert!(query.get(&mut world, e1).is_none());
+    }
+
+    // ============================================================================
+    // changed filter Tests
+    // ============================================================================
+
+    #[test]
+    fn test_changed_filter() {
+        let mut world = World::new();
+
+        let e1 = world.spawn((10u32, 5.0f32));
+        let e2 = world.spawn((20u32, 10.0f32));
+
+        // Initial tick
+        world.increment_tick();
+
+        // Modify e1's u32 component
+        {
+            let mut query = Query::<&mut u32>::new(&mut world.registry);
+            if let Some(mut val) = query.get(&mut world, e1) {
+                *val += 5;
+            }
+        }
+
+        // Increment tick after modification
+        world.increment_tick();
+
+        // Query for changed u32 components
+        let mut query = Query::<&u32, Changed<u32>>::new(&mut world.registry);
+
+        let mut changed_entities = Vec::new();
+        for val in query.iter(&mut world) {
+            changed_entities.push(*val);
+        }
+
+        // Only e1 should be returned as changed
+        assert_eq!(changed_entities.len(), 1);
+        assert_eq!(changed_entities[0], 15);
     }
 }

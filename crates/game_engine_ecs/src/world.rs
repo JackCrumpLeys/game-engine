@@ -24,7 +24,7 @@ impl EntityLocation {
 
 pub struct World {
     entities: Entities,
-    pub(crate) registry: ComponentRegistry,
+    pub registry: ComponentRegistry,
     pub(crate) archetypes: Vec<Archetype>,
     // Maps Entity Index -> Location
     entity_index: Vec<Option<EntityLocation>>,

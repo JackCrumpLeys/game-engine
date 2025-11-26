@@ -3,4 +3,19 @@ name = "game_engine_ecs"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[dev-dependencies]
+criterion = "0.7"
+
+[profile.release]
+lto = "fat"
+opt-level = 3
+codegen-units = 1
+
+[profile.bench]
+lto = "fat"
+opt-level = 3
+codegen-units = 1
+
+[[bench]]
+name = "iter_bench"
+harness = false
