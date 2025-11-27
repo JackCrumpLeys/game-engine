@@ -5,6 +5,7 @@ use crate::entity::{Entities, Entity};
 use crate::query::{Filter, Query, QueryToken};
 use crate::resource::Resources;
 use std::collections::HashMap;
+use std::ops::{Deref, Index, IndexMut};
 
 #[derive(Clone, Copy, Debug)]
 pub struct EntityLocation {
@@ -25,13 +26,58 @@ impl EntityLocation {
 pub struct World {
     entities: Entities,
     pub registry: ComponentRegistry,
-    pub(crate) archetypes: Vec<Archetype>,
+    pub(crate) archetypes: ArchetypeStore,
     // Maps Entity Index -> Location
     entity_index: Vec<Option<EntityLocation>>,
     // Maps Sorted Component IDs -> Archetype ID
     archetype_index: HashMap<Vec<ComponentId>, ArchetypeId>,
     resources: Resources,
     current_tick: u32,
+}
+
+pub struct ArchetypeStore(Vec<Archetype>);
+
+/// By not using a Vec directly, we can later change the storage strategy
+/// We also define only 2 mutating methods: push and index_mut
+impl ArchetypeStore {
+    pub fn new() -> Self {
+        ArchetypeStore(Vec::new())
+    }
+
+    pub fn push(&mut self, archetype: Archetype) {
+        self.0.push(archetype);
+    }
+
+    /// Gets an iterator over archetypes added since the given ArchetypeId.
+    pub fn since(&self, last_seen: ArchetypeId) -> impl Iterator<Item = &Archetype> {
+        self.0.iter().skip(last_seen.0 as usize)
+    }
+}
+
+impl Deref for ArchetypeStore {
+    type Target = Vec<Archetype>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Index<ArchetypeId> for ArchetypeStore {
+    type Output = Archetype;
+
+    fn index(&self, index: ArchetypeId) -> &Self::Output {
+        self.0
+            .get(index.0 as usize)
+            .expect("ArchetypeId out of bounds")
+    }
+}
+
+impl IndexMut<ArchetypeId> for ArchetypeStore {
+    fn index_mut(&mut self, index: ArchetypeId) -> &mut Self::Output {
+        self.0
+            .get_mut(index.0 as usize)
+            .expect("ArchetypeId out of bounds")
+    }
 }
 
 impl Default for World {
@@ -45,7 +91,7 @@ impl World {
         World {
             entities: Entities::new(),
             registry: ComponentRegistry::new(),
-            archetypes: Vec::new(),
+            archetypes: ArchetypeStore::new(),
             entity_index: Vec::new(),
             archetype_index: HashMap::new(),
             resources: Resources::new(),
@@ -65,14 +111,14 @@ impl World {
         let ent = self.entities.alloc();
         let comp_ids = bundle.component_ids(&mut self.registry);
         let arch_id = self.get_or_create_archetype(comp_ids);
-        let row = self.archetypes[arch_id.0 as usize].push_entity(ent);
+        let row = self.archetypes[arch_id].push_entity(ent);
 
         // Safety: We just pushed a new entity, so the last row is valid for writing.
         // Implementors of Bundle must ensure they only write components that exist in the
         // archetype.
         unsafe {
             bundle.put(
-                &mut self.archetypes[arch_id.0 as usize],
+                &mut self.archetypes[arch_id],
                 &self.registry,
                 self.current_tick,
             );
@@ -128,7 +174,7 @@ impl World {
             .expect("Entity should have a location"); // this should always be Some if the entity
         // is alive
 
-        if let Some(moved) = self.archetypes[loc.archetype_id.0 as usize].swap_remove(loc.row) {
+        if let Some(moved) = self.archetypes[loc.archetype_id].swap_remove(loc.row) {
             let ent_loc = self.entity_index[moved.index() as usize]
                 .as_mut()
                 .expect("Moved entity should have a location");

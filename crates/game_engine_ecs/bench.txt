@@ -1,0 +1,699 @@
+.section .text.iter_bench::query_iteration,"ax",@progbits
+	.p2align	4
+.type	iter_bench::query_iteration,@function
+iter_bench::query_iteration:
+		// benches/iter_bench.rs:287
+		fn query_iteration(
+	.cfi_startproc
+	.cfi_personality 155, DW.ref.rust_eh_personality
+	.cfi_lsda 27, .Lexception124
+	push rbp
+	.cfi_def_cfa_offset 16
+	push r15
+	.cfi_def_cfa_offset 24
+	push r14
+	.cfi_def_cfa_offset 32
+	push r13
+	.cfi_def_cfa_offset 40
+	push r12
+	.cfi_def_cfa_offset 48
+	push rbx
+	.cfi_def_cfa_offset 56
+	sub rsp, 120
+	.cfi_def_cfa_offset 176
+	.cfi_offset rbx, -56
+	.cfi_offset r12, -48
+	.cfi_offset r13, -40
+	.cfi_offset r14, -32
+	.cfi_offset r15, -24
+	.cfi_offset rbp, -16
+		// src/query.rs:345
+		self.update_archetype_cache(world);
+	mov r15, qword ptr [rdi + 136]
+	mov qword ptr [rsp], rdi
+	mov rax, qword ptr [rdi + 144]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:2719
+		self.len = 0;
+	mov qword ptr [rsi + 16], 0
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	test rax, rax
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	je .LBB286_68
+	mov r14, rsi
+	imul r12, rax, 104
+	add r12, r15
+	xor r13d, r13d
+	jmp .LBB286_2
+.LBB286_34:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:512
+		self.ptr.cast().as_non_null_ptr()
+	mov rax, qword ptr [r14 + 8]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:1932
+		intrinsics::write_via_move(dst, src)
+	mov dword ptr [rax + 4*r13], ebx
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:2485
+		self.len = len + 1;
+	inc r13
+	mov qword ptr [r14 + 16], r13
+	.p2align	4
+.LBB286_35:
+	add r15, 104
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	cmp r15, r12
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	je .LBB286_36
+.LBB286_2:
+		// src/query.rs:252
+		let has_view = self
+	mov rsi, qword ptr [r14 + 40]
+	mov rax, qword ptr [r15 + 8]
+	mov rcx, qword ptr [r15 + 16]
+	test rcx, rcx
+	je .LBB286_9
+	mov rdx, qword ptr [r14 + 32]
+	cmp rcx, 1
+	jne .LBB286_4
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	shl rsi, 3
+	xor edi, edi
+	.p2align	4
+.LBB286_17:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	cmp rsi, rdi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	je .LBB286_19
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3011
+		let cmp = f(unsafe { self.get_unchecked(base) });
+	mov r8, qword ptr [rax]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:291
+		if !f(x) {
+	lea r9, [rdi + 8]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3012
+		if cmp == Equal {
+	cmp r8, qword ptr [rdx + rdi]
+	mov rdi, r9
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:291
+		if !f(x) {
+	je .LBB286_17
+	jmp .LBB286_35
+	.p2align	4
+.LBB286_9:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	test rsi, rsi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	jne .LBB286_35
+		// src/query.rs:261
+		let has_filter = self
+	mov rdx, qword ptr [r14 + 56]
+	mov rsi, qword ptr [r14 + 64]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mut_ptr.rs:1008
+		unsafe { intrinsics::offset(self, count) }
+	lea rsi, [rdx + 8*rsi]
+	jmp .LBB286_11
+	.p2align	4
+.LBB286_4:
+	lea rsi, [rdx + 8*rsi]
+	.p2align	4
+.LBB286_5:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	cmp rdx, rsi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	je .LBB286_19
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:291
+		if !f(x) {
+	mov rdi, qword ptr [rdx]
+	mov r8, rcx
+	xor r9d, r9d
+	.p2align	4
+.LBB286_7:
+	mov r10, r9
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:2986
+		let half = size / 2;
+	mov r11, r8
+	shr r11
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:2987
+		let mid = base + half;
+	add r9, r11
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:384
+		#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+	cmp qword ptr [rax + 8*r9], rdi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hint.rs:797
+		crate::intrinsics::select_unpredictable(condition, true_val, false_val).assume_init()
+	cmova r9, r10
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3007
+		size -= half;
+	sub r8, r11
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:2985
+		while size > 1 {
+	cmp r8, 1
+	ja .LBB286_7
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:652
+		unsafe { NonNull { pointer: intrinsics::offset(self.as_ptr(), count) } }
+	add rdx, 8
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3012
+		if cmp == Equal {
+	cmp qword ptr [rax + 8*r9], rdi
+	je .LBB286_5
+	jmp .LBB286_35
+	.p2align	4
+.LBB286_19:
+		// src/query.rs:261
+		let has_filter = self
+	mov rdx, qword ptr [r14 + 56]
+	mov rdi, qword ptr [r14 + 64]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mut_ptr.rs:1008
+		unsafe { intrinsics::offset(self, count) }
+	lea rsi, [rdx + 8*rdi]
+	test rcx, rcx
+	je .LBB286_11
+	cmp rcx, 1
+	jne .LBB286_24
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	shl rdi, 3
+	xor esi, esi
+	.p2align	4
+.LBB286_22:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	cmp rdi, rsi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	je .LBB286_12
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3011
+		let cmp = f(unsafe { self.get_unchecked(base) });
+	mov r8, qword ptr [rax]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:291
+		if !f(x) {
+	lea r9, [rsi + 8]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3012
+		if cmp == Equal {
+	cmp r8, qword ptr [rdx + rsi]
+	mov rsi, r9
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:291
+		if !f(x) {
+	je .LBB286_22
+	jmp .LBB286_35
+	.p2align	4
+.LBB286_24:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	cmp rdx, rsi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	je .LBB286_12
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:291
+		if !f(x) {
+	mov rdi, qword ptr [rdx]
+	mov r8, rcx
+	xor r9d, r9d
+	.p2align	4
+.LBB286_26:
+	mov r10, r9
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:2986
+		let half = size / 2;
+	mov r11, r8
+	shr r11
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:2987
+		let mid = base + half;
+	add r9, r11
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:384
+		#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+	cmp qword ptr [rax + 8*r9], rdi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hint.rs:797
+		crate::intrinsics::select_unpredictable(condition, true_val, false_val).assume_init()
+	cmova r9, r10
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3007
+		size -= half;
+	sub r8, r11
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:2985
+		while size > 1 {
+	cmp r8, 1
+	ja .LBB286_26
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:652
+		unsafe { NonNull { pointer: intrinsics::offset(self.as_ptr(), count) } }
+	add rdx, 8
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3012
+		if cmp == Equal {
+	cmp qword ptr [rax + 8*r9], rdi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:291
+		if !f(x) {
+	je .LBB286_24
+	jmp .LBB286_35
+	.p2align	4
+.LBB286_11:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	cmp rdx, rsi
+	jne .LBB286_35
+.LBB286_12:
+		// src/query.rs:270
+		let has_excluded = self
+	mov rsi, qword ptr [r14 + 88]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	test rsi, rsi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	je .LBB286_32
+	test rcx, rcx
+	je .LBB286_32
+	mov rdx, qword ptr [r14 + 80]
+	cmp rcx, 1
+	jne .LBB286_15
+	mov rax, qword ptr [rax]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3012
+		if cmp == Equal {
+	cmp rax, qword ptr [rdx]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:308
+		if f(x) {
+	je .LBB286_35
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	shl rsi, 3
+	mov ecx, 8
+	.p2align	4
+.LBB286_31:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	cmp rsi, rcx
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	je .LBB286_32
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:308
+		if f(x) {
+	lea rdi, [rcx + 8]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3012
+		if cmp == Equal {
+	cmp rax, qword ptr [rdx + rcx]
+	mov rcx, rdi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:308
+		if f(x) {
+	jne .LBB286_31
+	jmp .LBB286_35
+.LBB286_15:
+	lea rsi, [rdx + 8*rsi]
+	.p2align	4
+.LBB286_42:
+	mov rdi, qword ptr [rdx]
+	mov r8, rcx
+	xor r9d, r9d
+	.p2align	4
+.LBB286_43:
+	mov r10, r9
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:2986
+		let half = size / 2;
+	mov r11, r8
+	shr r11
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:2987
+		let mid = base + half;
+	add r9, r11
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:384
+		#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+	cmp qword ptr [rax + 8*r9], rdi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hint.rs:797
+		crate::intrinsics::select_unpredictable(condition, true_val, false_val).assume_init()
+	cmova r9, r10
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3007
+		size -= half;
+	sub r8, r11
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:2985
+		while size > 1 {
+	cmp r8, 1
+	ja .LBB286_43
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/mod.rs:3012
+		if cmp == Equal {
+	cmp qword ptr [rax + 8*r9], rdi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:308
+		if f(x) {
+	je .LBB286_35
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:652
+		unsafe { NonNull { pointer: intrinsics::offset(self.as_ptr(), count) } }
+	add rdx, 8
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	cmp rdx, rsi
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	jne .LBB286_42
+.LBB286_32:
+		// src/query.rs:278
+		self.cached_archetypes.push(arch.id);
+	mov ebx, dword ptr [r15 + 96]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:2479
+		if len == self.buf.capacity() {
+	cmp r13, qword ptr [r14]
+	jne .LBB286_34
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:2480
+		self.buf.grow_one();
+	mov rdi, r14
+	call alloc::raw_vec::RawVec<T,A>::grow_one
+	jmp .LBB286_34
+.LBB286_36:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	test r13, r13
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	je .LBB286_68
+	mov r12, qword ptr [r14 + 8]
+	lea rax, [r12 + 4*r13]
+	mov qword ptr [rsp + 80], rax
+	mov rax, qword ptr [rsp]
+	add rax, 56
+	mov qword ptr [rsp + 72], rax
+	jmp .LBB286_38
+	.p2align	4
+.LBB286_48:
+	and rax, rdx
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:542
+		unsafe { crate::intrinsics::copy_nonoverlapping(src, dst, count) }
+	movdqu xmm1, xmmword ptr [rcx + rax]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/x86/sse2.rs:1476
+		simd_bitmask::<_, u16>(m) as u32 as i32
+	movdqa xmm2, xmm1
+	pcmpeqb xmm2, xmm0
+	pmovmskb edi, xmm2
+		// /rust/deps/hashbrown-0.15.4/src/control/bitmask.rs:50
+	test edi, edi
+	je .LBB286_52
+.LBB286_49:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/nonzero.rs:604
+		intrinsics::cttz_nonzero(self.get() as $Uint)
+	rep bsf	r8d, edi
+		// /rust/deps/hashbrown-0.15.4/src/raw/mod.rs:1919
+	add r8, rax
+	and r8, rdx
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mut_ptr.rs:1119
+		unsafe { intrinsics::offset(self, intrinsics::unchecked_sub(0, count as isize)) }
+	neg r8
+	lea r8, [r8 + 2*r8]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:1819
+		fn eq(&self, other: &Self) -> bool { *self == *other }
+	movabs r9, 2762763681099161699
+	cmp qword ptr [rcx + 8*r8 - 24], r9
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:420
+		if b {
+	jne .LBB286_51
+	movabs r9, 3558109665258667593
+	cmp qword ptr [rcx + 8*r8 - 16], r9
+	je .LBB286_54
+.LBB286_51:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/num/nonzero.rs:474
+		unsafe { intrinsics::transmute_unchecked(self) }
+	lea r8d, [rdi - 1]
+		// /rust/deps/hashbrown-0.15.4/src/control/bitmask.rs:50
+	and r8w, di
+	mov edi, r8d
+	jne .LBB286_49
+	.p2align	4
+.LBB286_52:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/../../stdarch/crates/core_arch/src/x86/sse2.rs:1476
+		simd_bitmask::<_, u16>(m) as u32 as i32
+	pcmpeqb xmm1, xmmword ptr [rip + .LCPI286_0]
+	pmovmskb edi, xmm1
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/intrinsics/mod.rs:420
+		if b {
+	test edi, edi
+	jne .LBB286_72
+		// /rust/deps/hashbrown-0.15.4/src/raw/mod.rs:91
+	add rax, rsi
+	add rax, 16
+		// /rust/deps/hashbrown-0.15.4/src/raw/mod.rs:90
+	add rsi, 16
+		// /rust/deps/hashbrown-0.15.4/src/raw/mod.rs:1899
+	jmp .LBB286_48
+.LBB286_54:
+		// src/component.rs:60
+		self.type_to_id.get(&TypeId::of::<T>()).cloned()
+	lea rax, [rcx + 8*r8]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1980
+		Some(t) => Some(t.clone()),
+	mov rsi, qword ptr [rax - 8]
+		// src/query.rs:151
+		let column = archetype.column(id)?;
+	mov rdi, rbp
+	call qword ptr [rip + game_engine_ecs::archetype::Archetype::column@GOTPCREL]
+	mov rbp, rax
+	test rax, rax
+	je .LBB286_72
+		// src/query.rs:153
+		if !column.borrow_state().borrow() {
+	mov rdi, rbp
+	call qword ptr [rip + game_engine_ecs::storage::Column::borrow_state@GOTPCREL]
+	mov rdi, rax
+	call qword ptr [rip + game_engine_ecs::borrow::AtomicBorrow::borrow@GOTPCREL]
+	test al, al
+	je .LBB286_59
+		// src/query.rs:160
+		let ptr = column.get_ptr(0) as *mut T;
+	mov rdi, rbp
+	xor esi, esi
+	call qword ptr [rip + game_engine_ecs::storage::Column::get_ptr@GOTPCREL]
+	mov r14, rax
+		// src/query.rs:163
+		borrow: column.borrow_state(),
+	mov rdi, rbp
+	call qword ptr [rip + game_engine_ecs::storage::Column::borrow_state@GOTPCREL]
+	mov rbp, rax
+	lea rax, [rsp + 24]
+	mov ecx, dword ptr [rsp + 20]
+	.p2align	4
+.LBB286_64:
+		// src/query.rs:97
+		*self.ticks.as_ptr() = self.current_tick;
+	mov dword ptr [rbx], ecx
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mut_ptr.rs:1008
+		unsafe { intrinsics::offset(self, count) }
+	add rbx, 4
+		// benches/iter_bench.rs:293
+		pos.x = pos.x * mat.m[0] + pos.y * mat.m[4] + pos.z * mat.m[8] + mat.m[12];
+	movss xmm0, dword ptr [r15]
+	movss xmm1, dword ptr [r15 + 4]
+	mulss xmm0, dword ptr [r14]
+	movss xmm2, dword ptr [r14 + 16]
+	mulss xmm2, xmm1
+	addss xmm2, xmm0
+	movss xmm0, dword ptr [r15 + 8]
+	movss xmm3, dword ptr [r14 + 32]
+	mulss xmm3, xmm0
+	addss xmm3, xmm2
+	addss xmm3, dword ptr [r14 + 48]
+	movss dword ptr [r15], xmm3
+	movss xmm2, dword ptr [r14 + 4]
+		// benches/iter_bench.rs:294
+		pos.y = pos.x * mat.m[1] + pos.y * mat.m[5] + pos.z * mat.m[9] + mat.m[13];
+	mulss xmm1, dword ptr [r14 + 20]
+	mulss xmm2, xmm3
+	addss xmm1, xmm2
+	movss xmm2, dword ptr [r14 + 36]
+	mulss xmm2, xmm0
+	addss xmm2, xmm1
+	addss xmm2, dword ptr [r14 + 52]
+	movss dword ptr [r15 + 4], xmm2
+		// benches/iter_bench.rs:295
+		pos.z = pos.x * mat.m[2] + pos.y * mat.m[6] + pos.z * mat.m[10] + mat.m[14];
+	mulss xmm3, dword ptr [r14 + 8]
+	mulss xmm2, dword ptr [r14 + 24]
+	addss xmm2, xmm3
+	mulss xmm0, dword ptr [r14 + 40]
+	addss xmm0, xmm2
+	addss xmm0, dword ptr [r14 + 56]
+	movss dword ptr [r15 + 8], xmm0
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/hint.rs:482
+		crate::intrinsics::black_box(dummy)
+	mov qword ptr [rsp + 24], r15
+	#APP
+	#NO_APP
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/range.rs:765
+		if self.start < self.end {
+	add r15, 12
+	add r14, 64
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/cmp.rs:1855
+		fn lt(&self, other: &Self) -> bool { *self <  *other }
+	dec r13
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/iter/range.rs:765
+		if self.start < self.end {
+	jne .LBB286_64
+	mov rdi, qword ptr [rsp + 8]
+		// src/query.rs:83
+		self.borrow.release_mut();
+	call qword ptr [rip + game_engine_ecs::borrow::AtomicBorrow::release_mut@GOTPCREL]
+		// src/query.rs:50
+		self.borrow.release();
+	mov rdi, rbp
+	call qword ptr [rip + game_engine_ecs::borrow::AtomicBorrow::release@GOTPCREL]
+	jmp .LBB286_67
+	.p2align	4
+.LBB286_38:
+		// src/query.rs:348
+		for &arch_id in &self.cached_archetypes {
+	mov edi, dword ptr [r12]
+	mov rax, qword ptr [rsp]
+		// src/query.rs:354
+		unsafe { &mut *(&mut world.archetypes[arch_id.0 as usize] as *mut Archetype) };
+	mov rsi, qword ptr [rax + 144]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:275
+		&mut (*slice)[self]
+	cmp rsi, rdi
+	jbe .LBB286_39
+	imul rbp, rdi, 104
+	add rbp, qword ptr [rax + 136]
+		// src/query.rs:356
+		let len = arch.len();
+	mov rdi, rbp
+	call qword ptr [rip + game_engine_ecs::archetype::Archetype::len@GOTPCREL]
+		// src/query.rs:357
+		if len == 0 {
+	test rax, rax
+	je .LBB286_67
+	mov r13, rax
+	mov r14, qword ptr [rsp]
+		// src/query.rs:364
+		if let Some(mut fetch) = Q::View::create_fetch(arch, &world.registry, world.tick()) {
+	mov rdi, r14
+	call qword ptr [rip + game_engine_ecs::world::World::tick@GOTPCREL]
+		// src/query.rs:602
+		$name::create_fetch(unsafe { &mut *ptr }, registry, tick)?,
+	lea rdi, [rsp + 24]
+	mov rsi, rbp
+	mov rdx, qword ptr [rsp + 72]
+	mov ecx, eax
+	call <&mut T as game_engine_ecs::query::View>::create_fetch
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:2547
+		match self {
+	mov r15, qword ptr [rsp + 24]
+	test r15, r15
+	je .LBB286_67
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:2548
+		Some(v) => ControlFlow::Continue(v),
+	mov rax, qword ptr [rsp + 32]
+	mov qword ptr [rsp + 8], rax
+	mov rbx, qword ptr [rsp + 40]
+	mov eax, dword ptr [rsp + 48]
+	mov dword ptr [rsp + 20], eax
+		// src/component.rs:60
+		self.type_to_id.get(&TypeId::of::<T>()).cloned()
+	movabs rax, 2762763681099161699
+	mov qword ptr [rsp + 24], rax
+	movabs rax, 3558109665258667593
+	mov qword ptr [rsp + 32], rax
+		// /rust/deps/hashbrown-0.15.4/src/map.rs:1351
+	cmp qword ptr [r14 + 104], 0
+	je .LBB286_72
+	mov r14, qword ptr [rsp]
+		// /rust/deps/hashbrown-0.15.4/src/map.rs:258
+	mov rdi, qword ptr [r14 + 112]
+	mov rsi, qword ptr [r14 + 120]
+	lea rdx, [rsp + 24]
+	call core::hash::BuildHasher::hash_one
+		// /rust/deps/hashbrown-0.15.4/src/control/tag.rs:48
+	mov rsi, rax
+	shr rsi, 57
+	mov rcx, qword ptr [r14 + 80]
+		// /rust/deps/hashbrown-0.15.4/src/raw/mod.rs:2338
+	mov rdx, qword ptr [r14 + 88]
+	movd xmm0, esi
+	punpcklbw xmm0, xmm0
+	pshuflw xmm0, xmm0, 0
+	pshufd xmm0, xmm0, 0
+	xor esi, esi
+	jmp .LBB286_48
+	.p2align	4
+.LBB286_72:
+	mov rdi, qword ptr [rsp + 8]
+		// src/query.rs:83
+		self.borrow.release_mut();
+	call qword ptr [rip + game_engine_ecs::borrow::AtomicBorrow::release_mut@GOTPCREL]
+.LBB286_67:
+	add r12, 4
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/non_null.rs:1656
+		self.as_ptr() == other.as_ptr()
+	cmp r12, qword ptr [rsp + 80]
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/iter/macros.rs:179
+		if ptr == crate::intrinsics::transmute::<$ptr, NonNull<T>>(end_or_len) {
+	jne .LBB286_38
+.LBB286_68:
+		// benches/iter_bench.rs:298
+		}
+	add rsp, 120
+	.cfi_def_cfa_offset 56
+	pop rbx
+	.cfi_def_cfa_offset 48
+	pop r12
+	.cfi_def_cfa_offset 40
+	pop r13
+	.cfi_def_cfa_offset 32
+	pop r14
+	.cfi_def_cfa_offset 24
+	pop r15
+	.cfi_def_cfa_offset 16
+	pop rbp
+	.cfi_def_cfa_offset 8
+	ret
+.LBB286_59:
+	.cfi_def_cfa_offset 176
+		// src/query.rs:156
+		std::any::type_name::<T>()
+	lea rax, [rip + .Lanon.e0bdf12362eb3a56210a566eead51a9b.141]
+	mov qword ptr [rsp + 104], rax
+	mov qword ptr [rsp + 112], 27
+	lea rax, [rsp + 104]
+		// src/query.rs:154
+		panic!(
+	mov qword ptr [rsp + 88], rax
+	lea rax, [rip + <&T as core::fmt::Display>::fmt]
+	mov qword ptr [rsp + 96], rax
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/fmt/rt.rs:214
+		Arguments { pieces, fmt: None, args }
+	lea rax, [rip + .Lanon.e0bdf12362eb3a56210a566eead51a9b.159]
+	mov qword ptr [rsp + 24], rax
+	mov qword ptr [rsp + 32], 2
+	mov qword ptr [rsp + 56], 0
+	lea rax, [rsp + 88]
+	mov qword ptr [rsp + 40], rax
+	mov qword ptr [rsp + 48], 1
+		// src/query.rs:154
+		panic!(
+	lea rsi, [rip + .Lanon.e0bdf12362eb3a56210a566eead51a9b.160]
+	lea rdi, [rsp + 24]
+	call qword ptr [rip + core::panicking::panic_fmt@GOTPCREL]
+	ud2
+.LBB286_39:
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/slice/index.rs:275
+		&mut (*slice)[self]
+	lea rdx, [rip + .Lanon.e0bdf12362eb3a56210a566eead51a9b.80]
+	call qword ptr [rip + core::panicking::panic_bounds_check@GOTPCREL]
+	mov rbx, rax
+		// src/query.rs:50
+		self.borrow.release();
+	mov rdi, rbp
+	call qword ptr [rip + game_engine_ecs::borrow::AtomicBorrow::release@GOTPCREL]
+	jmp .LBB286_75
+		// ~/.rustup/toolchains/nightly-2025-06-30-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/ptr/mod.rs:799
+		pub unsafe fn drop_in_place<T: PointeeSized>(to_drop: *mut T) {
+	call qword ptr [rip + core::panicking::panic_in_cleanup@GOTPCREL]
+	jmp .LBB286_71
+.LBB286_71:
+	mov rbx, rax
+	mov rdi, qword ptr [rsp + 8]
+		// src/query.rs:83
+		self.borrow.release_mut();
+	call qword ptr [rip + game_engine_ecs::borrow::AtomicBorrow::release_mut@GOTPCREL]
+.LBB286_75:
+	mov rdi, rbx
+	call _Unwind_Resume@PLT
+		// src/query.rs:592
+		fn create_fetch(
+	call qword ptr [rip + core::panicking::panic_in_cleanup@GOTPCREL]

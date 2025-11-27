@@ -1,15 +1,16 @@
-use crate::component::{ComponentId, ComponentRegistry};
+use crate::component::{ComponentId, ComponentMask, ComponentRegistry};
 use crate::entity::Entity;
 use crate::storage::Column;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ArchetypeId(pub u32);
 
 pub struct Archetype {
     pub id: ArchetypeId,
     // kept sorted for consistent hashing/lookups
     pub component_ids: Vec<ComponentId>,
+    pub component_mask: ComponentMask,
     entities: Vec<Entity>,
     columns: HashMap<ComponentId, Column>,
 }
@@ -34,6 +35,7 @@ impl Archetype {
                 }
                 cols
             },
+            component_mask: { ComponentMask::from_ids(&component_ids) },
             component_ids: {
                 let mut ids = component_ids;
                 ids.sort_unstable();
@@ -87,9 +89,39 @@ impl Archetype {
         }
     }
 
-    // Helper to access a specific column safely
+    /// Helper to access a specific column safely
     pub fn column(&mut self, id: ComponentId) -> Option<&mut Column> {
         self.columns.get_mut(&id)
+    }
+
+    /// Helper to Borrow a specific column
+    /// Returns false if the column does not exist or is already borrowed
+    pub fn borrow_column(&self, id: ComponentId) -> bool {
+        self.columns
+            .get(&id)
+            .map_or(false, |c| c.borrow_state().borrow())
+    }
+
+    /// Helper to borrow a specific column mutably
+    /// returns false if the column does not exist or is already borrowed
+    pub fn borrow_column_mut(&self, id: ComponentId) -> bool {
+        self.columns
+            .get(&id)
+            .map_or(false, |c| c.borrow_state().borrow_mut())
+    }
+
+    /// Releases a previously borrowed column
+    pub fn release_column(&self, id: ComponentId) {
+        if let Some(c) = self.columns.get(&id) {
+            c.borrow_state().release();
+        }
+    }
+
+    /// Releases a previously mutably borrowed column
+    pub fn release_column_mut(&self, id: ComponentId) {
+        if let Some(c) = self.columns.get(&id) {
+            c.borrow_state().release_mut();
+        }
     }
 }
 
