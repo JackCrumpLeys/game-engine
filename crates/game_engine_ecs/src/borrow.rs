@@ -1,6 +1,7 @@
 // Thanks to https://github.com/Ralith/hecs/blob/master/src/borrow.rs
 
 use core::sync::atomic::{AtomicUsize, Ordering};
+use std::backtrace::Backtrace;
 
 /// A bit mask used to signal the `AtomicBorrow` has an active mutable borrow.
 const UNIQUE_BIT: usize = !(usize::MAX >> 1);
@@ -31,6 +32,7 @@ impl AtomicBorrow {
     }
 
     pub fn borrow(&self) -> bool {
+        dbg!(Backtrace::capture());
         // Add one to the borrow counter
         let prev_value = self.0.fetch_add(1, Ordering::Acquire);
 
@@ -50,18 +52,21 @@ impl AtomicBorrow {
     }
 
     pub fn borrow_mut(&self) -> bool {
+        dbg!(Backtrace::capture());
         self.0
             .compare_exchange(0, UNIQUE_BIT, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
     }
 
     pub fn release(&self) {
+        dbg!(Backtrace::capture());
         let value = self.0.fetch_sub(1, Ordering::Release);
         debug_assert!(value != 0, "unbalanced release");
         debug_assert!(value & UNIQUE_BIT == 0, "shared release of unique borrow");
     }
 
     pub fn release_mut(&self) {
+        dbg!(Backtrace::capture());
         let value = self.0.fetch_and(!UNIQUE_BIT, Ordering::Release);
         debug_assert_ne!(value & UNIQUE_BIT, 0, "unique release of shared borrow");
     }
@@ -100,4 +105,3 @@ mod tests {
         assert!(counter.borrow());
     }
 }
-
