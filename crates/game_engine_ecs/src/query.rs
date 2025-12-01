@@ -1,13 +1,13 @@
 use crate::archetype::{Archetype, ArchetypeId};
-use crate::borrow::AtomicBorrow;
+use crate::borrow::{AtomicBorrow, ColumnBorrowChecker};
 use crate::component::{Component, ComponentId, ComponentMask, ComponentRegistry};
 use crate::entity::Entity;
 use crate::world::World;
 
-use std::any::type_name;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 // ============================================================================
 // Internal Machinery (Fetch & View)
@@ -85,6 +85,59 @@ impl<'a, T: 'static> Fetch<'a> for ReadFetch<T> {
     }
 }
 
+// ============================================================================
+// Public Interface (QueryToken)
+//    This is the bridge between Static Types (Query<(&A, &B)>) and Dynamic Views.
+// ============================================================================
+
+/// A marker trait for types that describe a query.
+/// Implemented for &'static T, &'static mut T, and tuples.
+/// Bridge between the lifetime-bound View and the static QueryData.
+pub trait QueryToken {
+    /// The actual View type constructed during iteration with lifetime 'a.
+    type View<'a>: View<'a>;
+    /// The static metadata type.
+    type Persistent: QueryData;
+}
+
+// ============================================================================
+// Token and static impls
+// ============================================================================
+
+impl<T: Component> QueryToken for &T {
+    type View<'a> = &'a T;
+    type Persistent = ReadComponent<T>;
+}
+
+pub struct ReadComponent<T>(PhantomData<T>);
+
+impl<T: Component> QueryData for ReadComponent<T> {
+    fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
+        out.push(registry.register::<T>());
+    }
+
+    fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {
+        checker.borrow(registry.get_id::<T>().expect("Component not registered"));
+    }
+}
+
+impl<T: Component> QueryToken for &mut T {
+    type View<'a> = Mut<'a, T>;
+    type Persistent = WriteComponent<T>;
+}
+
+pub struct WriteComponent<T>(PhantomData<T>);
+
+impl<T: Component> QueryData for WriteComponent<T> {
+    fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
+        out.push(registry.register::<T>());
+    }
+
+    fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {
+        checker.borrow_mut(registry.get_id::<T>().expect("Component not registered"));
+    }
+}
+
 // --- Write Implementation ---
 pub struct WriteFetch<'a, T> {
     ptr: NonNull<T>,
@@ -138,92 +191,6 @@ impl<'a, T: 'static> Fetch<'a> for WriteFetch<'a, T> {
         }
     }
 }
-// The wrapper yielded by the iterator
-pub struct Mut<'a, T> {
-    value: &'a mut T,
-    tick_ptr: *mut u32,
-    current_tick: u32,
-}
-
-impl<'a, T> std::ops::Deref for Mut<'a, T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        dbg!("Deref called");
-        self.value
-    }
-}
-
-impl<'a, T> std::ops::DerefMut for Mut<'a, T> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut T {
-        dbg!("DerefMut called");
-        dbg!(self.current_tick, type_name::<T>(), unsafe {
-            *self.tick_ptr
-        });
-        // ONLY update the tick when DerefMut is actually called
-        // SAFETY: tick_ptr is valid and points to a u32.
-        // This is guaranteed by the WriteFetch struct.
-        unsafe { *self.tick_ptr = self.current_tick };
-        self.value
-    }
-}
-
-// ============================================================================
-// Public Interface (QueryToken)
-//    This is the bridge between Static Types (Query<(&A, &B)>) and Dynamic Views.
-// ============================================================================
-
-/// A marker trait for types that describe a query.
-/// Implemented for &'static T, &'static mut T, and tuples.
-pub trait QueryToken: 'static {
-    /// The actual View type constructed during iteration with lifetime 'a.
-    type View<'a>: View<'a>;
-
-    fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>);
-}
-
-// --- Impl for &'static T ---
-impl<T: Component> QueryToken for &'static T {
-    type View<'a> = &'a T;
-
-    fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
-        out.push(registry.register::<T>());
-    }
-}
-
-impl<'a, T: Component> View<'a> for &'a T {
-    type Item = &'a T;
-    type Fetch = ReadFetch<T>;
-
-    fn create_fetch(
-        archetype: &'a mut Archetype,
-        registry: &ComponentRegistry,
-        _tick: u32,
-    ) -> Option<Self::Fetch> {
-        let id = registry.get_id::<T>()?;
-        let column = archetype.column(id)?;
-
-        let ptr = column.get_ptr(0) as *mut T;
-        // SAFETY: We have a shared borrow to the column.
-        // column's layout must match T as it was registered.
-        Some(ReadFetch {
-            ptr: unsafe { NonNull::new_unchecked(ptr) },
-        })
-    }
-
-    fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker) {
-        borrow_checker.borrow(registry.get_id::<T>().expect("Component not registered"));
-    }
-}
-
-// --- Impl for &'static mut T ---
-impl<T: Component> QueryToken for &'static mut T {
-    type View<'a> = Mut<'a, T>;
-
-    fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
-        out.push(registry.register::<T>());
-    }
-}
 
 impl<'a, T: Component> View<'a> for Mut<'a, T> {
     type Item = Mut<'a, T>;
@@ -235,7 +202,7 @@ impl<'a, T: Component> View<'a> for Mut<'a, T> {
         tick: u32,
     ) -> Option<Self::Fetch> {
         let id = registry.get_id::<T>()?;
-        let column = archetype.column(id)?;
+        let column = archetype.column_mut(id)?;
 
         // SAFETY: We have exclusive access to the column due to the mutable borrow.
         // Caller must use borrow_columns to first borrow the column mutably.
@@ -257,286 +224,224 @@ impl<'a, T: Component> View<'a> for Mut<'a, T> {
     }
 }
 
-// ============================================================================
-// Borrow Checker
-// ============================================================================
+impl<'a, T: Component> View<'a> for &'a T {
+    type Item = &'a T;
+    type Fetch = ReadFetch<T>;
 
-pub struct ColumnBorrowChecker {
-    borrows: HashMap<ComponentId, AccessType>,
+    fn create_fetch(
+        archetype: &'a mut Archetype,
+        registry: &ComponentRegistry,
+        _tick: u32,
+    ) -> Option<Self::Fetch> {
+        let id = registry.get_id::<T>()?;
+        let column = archetype.column_mut(id)?;
+
+        let ptr = column.get_ptr(0) as *mut T;
+        // SAFETY: We have a shared borrow to the column.
+        // column's layout must match T as it was registered.
+        Some(ReadFetch {
+            ptr: unsafe { NonNull::new_unchecked(ptr) },
+        })
+    }
+
+    fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker) {
+        borrow_checker.borrow(registry.get_id::<T>().expect("Component not registered"));
+    }
+}
+// The wrapper yielded by the iterator
+pub struct Mut<'a, T> {
+    value: &'a mut T,
+    tick_ptr: *mut u32,
+    current_tick: u32,
 }
 
-enum AccessType {
-    Immutable,
-    Mutable,
-}
-
-impl ColumnBorrowChecker {
-    pub fn new() -> Self {
-        Self {
-            borrows: HashMap::new(),
-        }
-    }
-
-    pub fn try_borrow(&mut self, comp_id: ComponentId, mutable: bool) -> bool {
-        match self.borrows.get(&comp_id) {
-            Some(AccessType::Mutable) => false, // Already mutably borrowed
-            Some(AccessType::Immutable) if mutable => false, // Cannot mutably borrow if immutably borrowed
-            _ => {
-                // No existing borrow or compatible borrow
-                self.borrows.insert(
-                    comp_id,
-                    if mutable {
-                        AccessType::Mutable
-                    } else {
-                        AccessType::Immutable
-                    },
-                );
-                true
-            }
-        }
-    }
-
-    /// Overlay another instance representing a second sequentially isolated borrow.
-    /// This add any new borrows and upgrade to mut whenere needed.
-    /// (Mut) None -> Mut
-    /// (imm) None -> imm
-    /// (mut) imm -> Mut
-    pub fn overlay(&mut self, other: &ColumnBorrowChecker) {
-        for (comp_id, access) in &other.borrows {
-            match (self.borrows.get(comp_id), access) {
-                (Some(AccessType::Mutable), _) => {} // Already mutably borrowed
-                (_, AccessType::Mutable) => {
-                    // Upgrade to mutable
-                    self.borrows.insert(*comp_id, AccessType::Mutable);
-                }
-                (Some(AccessType::Immutable), AccessType::Immutable) => {} // Already immutably borrowed
-                (None, AccessType::Immutable) => {
-                    self.borrows.insert(*comp_id, AccessType::Immutable);
-                }
-            }
-        }
-    }
-
-    pub fn apply_borrow(&self, arch: &Archetype) -> bool {
-        for comp_id in arch.component_ids.iter() {
-            if let Some(access) = self.borrows.get(comp_id) {
-                match access {
-                    AccessType::Immutable => {
-                        if !arch.borrow_column(*comp_id) {
-                            return false;
-                        }
-                    }
-                    AccessType::Mutable => {
-                        if !arch.borrow_column_mut(*comp_id) {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-        true
-    }
-
-    pub fn release_borrow(&self, arch: &Archetype) {
-        for comp_id in arch.component_ids.iter() {
-            if let Some(access) = self.borrows.get(comp_id) {
-                match access {
-                    AccessType::Immutable => {
-                        arch.release_column(*comp_id);
-                    }
-                    AccessType::Mutable => {
-                        arch.release_column_mut(*comp_id);
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.borrows.clear();
-    }
-
-    /// Attempt to borrow a component column.
-    /// panics on conflict.
-    pub fn borrow(&mut self, comp_id: ComponentId) {
-        if !self.try_borrow(comp_id, false) {
-            panic!("Runtime borrow conflict detected") // TODO: better error message
-        }
-    }
-
-    /// attempt to mutably borrow a component column.
-    /// panics on conflict.
-    pub fn borrow_mut(&mut self, comp_id: ComponentId) {
-        if !self.try_borrow(comp_id, true) {
-            panic!("Runtime borrow conflict detected") // TODO: better error message
-        }
+impl<'a, T> std::ops::Deref for Mut<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
     }
 }
 
+impl<'a, T> std::ops::DerefMut for Mut<'a, T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut T {
+        // ONLY update the tick when DerefMut is actually called
+        // SAFETY: tick_ptr is valid and points to a u32.
+        // This is guaranteed by the WriteFetch struct.
+        unsafe { *self.tick_ptr = self.current_tick };
+        self.value
+    }
+}
+
+/// Trait for the static metadata required to manage a query (IDs, Locks).
+/// This MUST be 'static.
+pub trait QueryData: 'static + Send + Sync {
+    fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>);
+    fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker);
+}
+
+impl QueryToken for Entity {
+    type View<'a> = Entity;
+    type Persistent = EntityData;
+}
+
+pub struct EntityData;
+impl QueryData for EntityData {
+    fn populate_ids(_: &mut ComponentRegistry, _: &mut Vec<ComponentId>) {}
+    fn borrow_columns(_: &ComponentRegistry, _: &mut ColumnBorrowChecker) {}
+}
+
+impl<'a> View<'a> for Entity {
+    type Item = Entity;
+    type Fetch = EntityFetch<'a>;
+
+    fn create_fetch(
+        archetype: &'a mut Archetype,
+        _registry: &ComponentRegistry,
+        _tick: u32,
+    ) -> Option<Self::Fetch> {
+        Some(EntityFetch {
+            entities: archetype.entities(),
+            current: 0,
+        })
+    }
+
+    fn borrow_columns(_registry: &ComponentRegistry, _borrow_checker: &mut ColumnBorrowChecker) {
+        // No components to borrow
+    }
+}
+
+pub struct EntityFetch<'a> {
+    entities: &'a [Entity],
+    current: usize,
+}
+
+impl<'a> Fetch<'a> for EntityFetch<'a> {
+    type Item = Entity;
+
+    unsafe fn next(&mut self) -> Self::Item {
+        let ent = self.entities[self.current];
+        self.current += 1;
+        ent
+    }
+
+    unsafe fn get(&mut self, index: usize) -> Self::Item {
+        self.entities[index]
+    }
+
+    unsafe fn skip(&mut self, count: usize) {
+        self.current += count;
+    }
+}
+
+// --- Impl for &'static mut T ---
+
 // ============================================================================
-// The Query Struct
+// The QueryInner Struct (Stores Static Data & State)
 // ============================================================================
 
-pub struct Query<Q: QueryToken, F: Filter = ()> {
+/// `QueryInner` acts as the persistent state for a system query.
+///
+/// It holds:
+/// 1. **Static Metadata**: Component IDs and Masks required for Views (`QD`) and Filters (`FD`).
+/// 2. **State**: A cache of matching `ArchetypeId`s to avoid scanning all archetypes every frame.
+/// 3. **Safety**: A `ColumnBorrowChecker` to ensure this query doesn't violate aliasing rules
+///    (e.g., mutable access to the same component twice).
+///
+/// This struct is `Send + Sync` because it only holds metadata, not actual component references.
+pub struct QueryInner<QD: QueryData, FD: FilterData = ()> {
     cached_archetypes: Vec<ArchetypeId>,
     last_updated_arch_idx: ArchetypeId,
+    /// The tick at which this query was last run. Used for change detection filters.
     last_query_tick: u32,
+    /// Helper to track which columns are borrowed during iteration.
     borrow_checker: ColumnBorrowChecker,
-
-    // IDs needed for the View (Q)
+    /// Mask of components required by the View (e.g., `&Position`, `&mut Velocity`).
     view_required: ComponentMask,
-
-    // IDs needed for the Filter (F)
+    /// Mask of components required by the Filter (e.g., `With<Player>`).
     filter_required: ComponentMask,
+    /// Mask of components explicitly excluded (e.g., `Without<Static>`).
     filter_excluded: ComponentMask,
-
-    _marker: PhantomData<(Q, F)>,
+    _marker: PhantomData<(QD, FD)>,
 }
 
-impl<Q: QueryToken, F: Filter> Query<Q, F> {
-    pub fn new(registry: &mut ComponentRegistry) -> Self {
+// SAFETY: QueryInner only holds integers (IDs) and bitmasks. It does not hold
+// references to World data.
+unsafe impl<QD: QueryData, FD: FilterData> Send for QueryInner<QD, FD> {}
+unsafe impl<QD: QueryData, FD: FilterData> Sync for QueryInner<QD, FD> {}
+
+impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
+    /// Factory method that takes Dynamic tokens (`Q`, `F`) to extract their
+    /// Static counterparts (`QD`, `FD`) and initialize the struct.
+    pub fn new<Q: QueryToken<Persistent = QD>, F: Filter<Persistent = FD>>(
+        registry: &mut ComponentRegistry,
+    ) -> Self {
         let mut view_required = Vec::new();
-        Q::populate_ids(registry, &mut view_required);
+        QD::populate_ids(registry, &mut view_required);
 
         let mut filter_required = Vec::new();
         let mut filter_excluded = Vec::new();
-        F::populate_requirements(registry, &mut filter_required, &mut filter_excluded);
-
-        let view_required_mask = ComponentMask::from_ids(&view_required);
-        let filter_required_mask = ComponentMask::from_ids(&filter_required);
-        let filter_excluded_mask = ComponentMask::from_ids(&filter_excluded);
-
-        dbg!(type_name::<Q>(), type_name::<F>());
-        dbg!("View Required:", &view_required_mask);
+        FD::populate_requirements(registry, &mut filter_required, &mut filter_excluded);
 
         Self {
             borrow_checker: ColumnBorrowChecker::new(),
             cached_archetypes: Vec::new(),
             last_updated_arch_idx: ArchetypeId(0),
-            view_required: view_required_mask,
-            filter_required: filter_required_mask,
-            filter_excluded: filter_excluded_mask,
+            view_required: ComponentMask::from_ids(&view_required),
+            filter_required: ComponentMask::from_ids(&filter_required),
+            filter_excluded: ComponentMask::from_ids(&filter_excluded),
             last_query_tick: 0,
             _marker: PhantomData,
         }
     }
 
-    /// Updates the cached archetypes if new archetypes have been added.
-    /// We iterate in order, so the cached_archetypes remain sorted.
+    /// Scans new archetypes in the World since the last update and adds matches to the cache.
     fn update_archetype_cache(&mut self, world: &World) {
         if self.last_updated_arch_idx.0 as usize == world.archetypes.len() {
-            return; // No new archetypes
+            return;
         }
-
         for arch in world.archetypes.since(self.last_updated_arch_idx) {
-            dbg!(arch.id);
-            dbg!(
-                arch.component_mask,
-                self.view_required,
-                self.filter_required,
-                self.filter_excluded
-            );
-            if dbg!(self.check_archetype(arch)) {
+            if self.check_archetype(arch) {
                 self.cached_archetypes.push(arch.id);
             }
         }
-
-        self.last_updated_arch_idx.0 = world.archetypes.len() as u32;
+        self.last_updated_arch_idx.0 = world.archetypes.len();
     }
 
-    #[inline(always)]
+    /// Checks if a specific archetype matches the View and Filter requirements.
     fn check_archetype(&self, arch: &Archetype) -> bool {
-        // 1. Check View Requirements (MUST have these to access data)
-        if !dbg!(arch.component_mask.contains_all(&self.view_required)) {
+        // Must have all components requested by the View (e.g., &Position)
+        if !arch.component_mask.contains_all(&self.view_required) {
             return false;
         }
-
-        // 2. Check Filter Requirements (With<T>)
-        if !dbg!(arch.component_mask.contains_all(&self.filter_required)) {
+        // Must have all components requested by With<T>
+        if !arch.component_mask.contains_all(&self.filter_required) {
             return false;
         }
-
-        // 3. Check Filter Exclusions (Without<T>)
-        if dbg!(arch.component_mask.intersects(&self.filter_excluded)) {
+        // Must NOT have any components requested by Without<T>
+        if arch.component_mask.intersects(&self.filter_excluded) {
             return false;
         }
         true
     }
 
-    pub fn iter<'a>(&'a mut self, world: &'a mut World) -> QueryIter<'a, Q::View<'a>, F> {
-        self.update_archetype_cache(world);
-        if !self.borrow_check(world) {
-            panic!("Query borrow conflict detected");
-        }
-
-        let tick = world.tick();
-
-        let res = QueryIter {
-            world,
-            archetype_ids: &self.cached_archetypes,
-            current_arch_idx: 0,
-            last_query_tick: self.last_query_tick,
-            borrow_checker: &mut self.borrow_checker,
-            current_fetch: None,
-            current_len: 0,
-            current_row: 0,
-            current_skip_filter: None,
-        };
-
-        self.last_query_tick = tick;
-
-        res
-    }
-
-    /// Get specific entity's query view, if it matches.
-    /// Returns None if the entity does not exist or does not match the query.
-    /// Panics if the query borrows conflict with existing borrows.
-    pub fn get<'a>(
-        &'a mut self,
-        world: &'a mut World,
-        entity: Entity,
-    ) -> Option<<Q::View<'a> as View<'a>>::Item> {
-        // 1. O(1) Lookup
-        let location = world.entity_location(entity)?;
-        let arch_id = location.archetype_id();
-        let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
-
-        if !self.check_archetype(arch) {
-            return None; // Archetype does not match
-        }
-
-        let arch2 = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
-
-        /// our own O(1) borrow checker for this single access.
-        let mut borrow_checker = ColumnBorrowChecker::new();
-
-        F::borrow_columns(&world.registry, &mut borrow_checker);
-
-        if !borrow_checker.apply_borrow(arch) {
-            panic!("Query borrow conflict detected");
-        }
-
-        // 4. Fetch
-        let mut fetch = Q::View::create_fetch(arch, &world.registry, world.tick())?;
-
-        borrow_checker.release_borrow(arch2);
-        unsafe { Some(fetch.get(location.row())) } // TODO: Put res in a wrapper that releases
-        // borrows on drop
-    }
-
-    fn borrow_check(&mut self, world: &mut World) -> bool {
-        // Borrow Check all Archetypes
-
-        // We know that filter actions happen strictly before view actions.
-        // This means both can have murtable borrows.
+    /// Validates that the query's borrow requirements do not conflict internally.
+    /// Also applies these borrows to the matching archetypes in the world to ensure
+    /// runtime safety against other simultaneous queries (if we were multi-threaded without a scheduler).
+    pub(crate) fn borrow_check(&mut self, world: &mut World) -> bool {
+        // 1. Calculate View borrows (e.g., &mut Position)
+        // 2. Calculate Filter borrows (e.g., Changed<Velocity> requires reading ticks)
         let mut filter_borrow_checker = ColumnBorrowChecker::new();
-        Q::View::borrow_columns(&world.registry, &mut self.borrow_checker);
-        F::borrow_columns(&world.registry, &mut filter_borrow_checker);
+        QD::borrow_columns(&world.registry, &mut self.borrow_checker);
+        FD::borrow_columns(&world.registry, &mut filter_borrow_checker);
 
+        // 3. Merge them. Allows both View and Filter to borrow their columns (even if
+        //    overlapping). Thsi is safe because View and Filter never run concurrently.
         self.borrow_checker.overlay(&filter_borrow_checker);
+
+        // 4. Apply locks to actual archetypes.
         for &arch_id in &self.cached_archetypes {
             let arch = &mut world.archetypes[arch_id];
-
             if !self.borrow_checker.apply_borrow(arch) {
                 return false;
             }
@@ -544,32 +449,97 @@ impl<Q: QueryToken, F: Filter> Query<Q, F> {
         true
     }
 
-    fn release_borrows(&mut self, world: &mut World) {
-        for &arch_id in &self.cached_archetypes {
-            let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
-            self.borrow_checker.release_borrow(arch);
-        }
-        self.borrow_checker.clear();
-    }
+    /// Returns a list of borrows needed by this query. Used by the `Scheduler` to
+    /// determine which systems can run in parallel.
+    pub(crate) fn granular_borrow_check(
+        &mut self,
+        world: &World,
+        start_from: ArchetypeId,
+    ) -> Vec<(ArchetypeId, ColumnBorrowChecker)> {
+        let mut borrow_checker = ColumnBorrowChecker::new();
+        let mut filter_borrow_checker = ColumnBorrowChecker::new();
+        QD::borrow_columns(&world.registry, &mut borrow_checker);
+        FD::borrow_columns(&world.registry, &mut filter_borrow_checker);
 
-    pub fn for_each<'a, Func>(&'a mut self, world: &'a mut World, mut func: Func)
-    where
-        Func: FnMut(<Q::View<'a> as View<'a>>::Item),
-    {
+        // Merge them. Allows both View and Filter to borrow their columns (even if
+        // overlapping). Thsi is safe because View and Filter never run concurrently.
+        self.borrow_checker.overlay(&filter_borrow_checker);
+
         self.update_archetype_cache(world);
 
-        // Borrow Check all Archetypes first
+        self.cached_archetypes
+            .iter()
+            .filter(|&&id| id >= start_from)
+            .copied()
+            .map(|arch_id| {
+                let arch = &world.archetypes[arch_id];
+                (arch_id, borrow_checker.for_archetype(arch))
+            })
+            .collect()
+    }
+
+    /// Creates an iterator over the query results.
+    ///
+    /// # Generic Parameters
+    /// * `V`: The Dynamic View type (e.g., `&'a Position`).
+    /// * `F`: The Dynamic Filter type (e.g., `Changed<Velocity>`).
+    pub fn iter<'a, V: View<'a>, F: Filter<Persistent = FD>>(
+        &'a mut self,
+        world: &'a mut World,
+    ) -> QueryIter<'a, V, F> {
+        self.update_archetype_cache(world);
+
+        // Runtime Borrow Check: Locks the columns in the archetypes.
+        // If this fails, it means another iterator is holding a conflicting lock.
         if !self.borrow_check(world) {
             panic!("Query borrow conflict detected");
         }
 
-        // Iterate Matched Archetypes
+        let tick = world.tick();
+        self.last_query_tick = tick;
+
+        QueryIter {
+            world,
+            archetype_ids: &self.cached_archetypes,
+            current_arch_idx: 0,
+            borrow_checker: &mut self.borrow_checker,
+            current_fetch: None,
+            current_skip_filter: None,
+            current_len: 0,
+            current_row: 0,
+            last_query_tick: tick,
+        }
+    }
+
+    /// Iterates deeply, running a closure on every match.
+    /// This is often faster than `iter()` because it avoids strict iterator state management
+    /// and compiler optimization barriers.
+    pub fn for_each<'a, V: View<'a>, F: Filter<Persistent = FD>, Func>(
+        &'a mut self,
+        world: &'a mut World,
+        mut func: Func,
+    ) where
+        Func: FnMut(V::Item),
+    {
+        self.update_archetype_cache(world);
+        if !self.borrow_check(world) {
+            panic!("Query borrow conflict detected");
+        }
+
+        // Capture tick before update for filter logic
+        let query_tick = self.last_query_tick;
+
         for &arch_id in &self.cached_archetypes {
-            // SAFETY: We iterate distinct archetypes.
-            // We use unsafe to get a mutable reference to the archetype
-            // while holding a mutable reference to the world.
-            // The borrow checker normally stops this, but we know archetypes are disjoint.
-            // We do runtime borrow checking
+            // SAFETY: We iterate distinct archetypes sequentially.
+            // We cast `*mut Archetype` to create two mutable references (`arch`, `arch2`).
+            //
+            // WHY IS THIS SAFE?
+            // 1. `arch` is used for the View (reading/writing component data).
+            // 2. `arch2` is used for the Filter (reading component ticks/data).
+            //
+            // The `borrow_check` above guarantees that the columns requested by View and Filter
+            // do not overlap mutably (e.g. View writes Pos, Filter reads Pos is forbidden).
+            // The `AtomicBorrow` locks inside the columns ensure runtime enforcement.
             let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
             let arch2 = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
 
@@ -578,30 +548,27 @@ impl<Q: QueryToken, F: Filter> Query<Q, F> {
                 continue;
             }
 
-            let mut current_skip_filter =
-                F::create_skip_filter(arch2, &world.registry, self.last_query_tick);
+            // Create Filter (e.g., checks change ticks)
+            let mut current_skip_filter = F::create_skip_filter(arch2, &world.registry, query_tick);
 
-            // Create the Fetch (Borrows happen here, ONCE per chunk)
-            // this should be some else the cache is invalid.
-            if let Some(mut fetch) = Q::View::create_fetch(arch, &world.registry, world.tick()) {
+            // Create Fetch (pointers to data columns)
+            if let Some(mut fetch) = V::create_fetch(arch, &world.registry, world.tick()) {
                 if let Some(skip_filter) = &mut current_skip_filter {
                     for _ in 0..len {
-                        // Check if we should skip this row
+                        // Check filter first
                         if skip_filter.should_skip() {
-                            // Advance fetch without calling func
-                            // Safety: fetch.next() is safe because we are within bounds 0..len
-                            unsafe { fetch.skip(1) }; // TODO: Jump ahead more efficiently
-                            continue; // Skip to next iteration
+                            // SAFETY: `skip(1)` simply advances the pointers. We are in bounds (0..len).
+                            unsafe { fetch.skip(1) };
+                            continue;
                         }
-                        // SAFETY: fetch.next() is safe because we are within bounds 0..len
+                        // SAFETY: `next()` reads/writes data. We are in bounds.
                         unsafe {
                             func(fetch.next());
                         }
                     }
                 } else {
-                    // The compiler sees a simple 0..len loop with no branches inside.
+                    // Optimized loop without filter checks
                     for _ in 0..len {
-                        // SAFETY: fetch.next() is safe because we are within bounds 0..len
                         unsafe {
                             func(fetch.next());
                         }
@@ -609,25 +576,133 @@ impl<Q: QueryToken, F: Filter> Query<Q, F> {
                 }
             }
         }
+
         self.last_query_tick = world.tick();
         self.release_borrows(world);
+    }
+
+    /// Fetches a specific entity's data if it matches the query.
+    pub fn get<'a, V: View<'a>, F: Filter<Persistent = FD>>(
+        &'a mut self,
+        world: &'a mut World,
+        entity: Entity,
+    ) -> Option<GetGuard<'a, V::Item>> {
+        // 1. Find Entity Location (O(1))
+        let location = world.entity_location(entity)?;
+        let arch_id = location.archetype_id();
+        let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
+
+        // 2. Check if Entity's Archetype matches Query masks
+        if !self.check_archetype(arch) {
+            return None;
+        }
+
+        // 3. Local Borrow Check (just for this specific access)
+        let arch2 = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
+        let mut borrow_checker = ColumnBorrowChecker::new();
+        QD::borrow_columns(&world.registry, &mut borrow_checker);
+        FD::borrow_columns(&world.registry, &mut borrow_checker);
+
+        if !borrow_checker.apply_borrow(arch) {
+            panic!("Query borrow conflict detected");
+        }
+
+        // 4. Create Fetch pointing to the start of the archetype
+        let mut fetch = V::create_fetch(arch, &world.registry, self.last_query_tick)?;
+
+        // 5. Retrieve the atomic borrow states so `GetGuard` can release them later
+        let raw_borrows = borrow_checker.get_raw_borrows(arch2);
+
+        // 6. Get the specific row data
+        // SAFETY: `location.row()` comes from `world.entity_index` which is kept in sync with archetypes.
+        unsafe { Some(GetGuard::new(fetch.get(location.row()), raw_borrows)) }
+    }
+
+    /// Releases locks on all cached archetypes. Called when Iterators/Guards drop.
+    fn release_borrows(&mut self, world: &mut World) {
+        for &arch_id in &self.cached_archetypes {
+            let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
+            self.borrow_checker.release_borrow(arch);
+        }
+        self.borrow_checker.clear();
+    }
+
+    pub(crate) fn last_updated_arch_idx(&self) -> ArchetypeId {
+        self.last_updated_arch_idx
     }
 }
 
 // ============================================================================
-// The Iterator
+// GetGuard (RAII for Single Entity Access)
 // ============================================================================
 
-pub struct QueryIter<'a, V: View<'a>, F: Filter = ()> {
+/// An RAII wrapper returned by `Query::get`.
+/// It provides access to the query item (e.g. `(&mut Position, &Velocity)`).
+/// When dropped, it releases the runtime locks on the component columns.
+pub struct GetGuard<'a, T> {
+    inner: T,
+    /// List of atomic borrows to release on drop.
+    /// Format: (Pointer to AtomicBorrow, is_mutable)
+    borrows: Vec<(&'a AtomicBorrow, bool)>,
+}
+
+impl<'a, T> Drop for GetGuard<'a, T> {
+    fn drop(&mut self) {
+        // Release all locks acquired for this specific access
+        for (borrow, is_mut) in &self.borrows {
+            if *is_mut {
+                borrow.release_mut();
+            } else {
+                borrow.release();
+            }
+        }
+    }
+}
+
+impl<T> std::ops::Deref for GetGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T> std::ops::DerefMut for GetGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<'a, T> GetGuard<'a, T> {
+    fn new(inner: T, borrows: Vec<(&'a AtomicBorrow, bool)>) -> Self {
+        Self { inner, borrows }
+    }
+}
+
+// ============================================================================
+// The Query Iterator
+// ============================================================================
+
+/// An iterator that walks through matching archetypes and returns component data.
+/// It holds the locks on the columns for the duration of its lifetime.
+pub struct QueryIter<'a, V: View<'a>, F: Filter> {
+    /// Reference to the world to access archetypes.
     world: &'a mut World,
+    /// List of archetypes that match the query requirements.
     archetype_ids: &'a [ArchetypeId],
+    /// Index of the archetype we are currently iterating.
     current_arch_idx: usize,
+    /// The tick used for filter change detection.
     last_query_tick: u32,
+    /// Reference to the checker in `QueryInner` to release borrows on drop.
     borrow_checker: &'a mut ColumnBorrowChecker,
 
+    /// The Fetch object for the current archetype. Holds raw pointers to columns.
     current_fetch: Option<V::Fetch>,
+    /// The Filter object for the current archetype.
     current_skip_filter: Option<F::SkipFilter<'a>>,
+    /// Length of the current archetype.
     current_len: usize,
+    /// Current row index within the archetype.
     current_row: usize,
 }
 
@@ -636,38 +711,43 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            // Case 1: Fetch valid?
-            if let Some(fetch) = &mut self.current_fetch
-                && self.current_row < self.current_len
-            {
-                self.current_row += 1;
+            // 1. Try to pull from the current archetype's fetch
+            if let Some(fetch) = &mut self.current_fetch {
+                if self.current_row < self.current_len {
+                    self.current_row += 1;
 
-                if let Some(skip_filter) = &mut self.current_skip_filter {
-                    // Check if we should skip this row
-                    if skip_filter.should_skip() {
-                        unsafe { fetch.skip(1) }; // Advance fetch without returning item
-                        continue; // Skip to next iteration
+                    // Apply Filter Logic
+                    if let Some(skip_filter) = &mut self.current_skip_filter {
+                        if skip_filter.should_skip() {
+                            // Skip this entity.
+                            // SAFETY: `fetch.skip(1)` simply advances the pointers.
+                            // We checked `current_row < current_len`, so this is safe.
+                            unsafe { fetch.skip(1) };
+                            continue;
+                        }
                     }
-                }
 
-                // SAFETY: We have verified that current_row < current_len
-                return Some(unsafe { fetch.next() });
+                    // Return Item
+                    // SAFETY:
+                    // 1. `fetch` holds valid pointers to columns for this archetype.
+                    // 2. We checked bounds `current_row < current_len`.
+                    // 3. The `AtomicBorrow` locks prevent data races.
+                    return Some(unsafe { fetch.next() });
+                }
             }
 
-            // Case 2: We have finished all matched archetypes
+            // 2. Current archetype exhausted or not set. Move to next.
             if self.current_arch_idx >= self.archetype_ids.len() {
                 return None;
             }
 
-            // Case 3: Setup next archetype
             let arch_id = self.archetype_ids[self.current_arch_idx];
             self.current_arch_idx += 1;
 
-            // Borrow Archetype mutably twice
-            // SAFETY: We access distinct archetypes sequentially.
-            // Creating the fetch will borrow columns as needed using the runtime AtomicBorrow.
-            // we need to do this unsafe trick to get a mutable reference from a shared one.
-            // Creating the filter MAY also borrow columns similarly.
+            // SAFETY: See comment in `QueryInner::for_each`.
+            // We are splitting the archetype pointer to allow disjoint column access
+            // between the View (V) and the Filter (F).
+            // Aliasing is guaranteed safe by `QueryInner::borrow_check`.
             let arch = unsafe { &mut *(&mut self.world.archetypes[arch_id] as *mut Archetype) };
             let arch2 = unsafe { &mut *(&mut self.world.archetypes[arch_id] as *mut Archetype) };
 
@@ -675,6 +755,7 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
                 continue;
             }
 
+            // Setup state for new archetype
             self.current_len = arch.len();
             self.current_row = 0;
             self.current_fetch = V::create_fetch(arch, &self.world.registry, self.world.tick());
@@ -686,47 +767,49 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
 
 impl<'a, V: View<'a>, F: Filter> Drop for QueryIter<'a, V, F> {
     fn drop(&mut self) {
-        // Release borrows
-        for &arch_id in &self.archetype_ids[0..self.current_arch_idx] {
+        // Critical: Release the runtime locks on all archetypes we touched.
+        for &arch_id in self.archetype_ids {
             let arch = unsafe { &mut *(&mut self.world.archetypes[arch_id] as *mut Archetype) };
             self.borrow_checker.release_borrow(arch);
         }
         self.borrow_checker.clear();
     }
 }
-
 // ============================================================================
 // Filters
 // ============================================================================
 
-pub trait Filter: 'static {
-    type SkipFilter<'a>: SkipFilter = ();
-
+// Static data for filters (IDs, Borrows)
+pub trait FilterData: 'static + Send + Sync {
     fn populate_requirements(
         registry: &mut ComponentRegistry,
         required: &mut Vec<ComponentId>,
         excluded: &mut Vec<ComponentId>,
     );
+    fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {}
+}
 
-    /// this constructs the SkipFilter for this archetype.
-    /// Takes a mutable reference to the archetype so it can borrow columns as needed.
-    /// Takes the cached last_query_tick tick to compare against.
-    /// returns None if the skip filter does not need to be applie
+// Dynamic behavior for filters (Skip logic)
+pub trait Filter {
+    type Persistent: FilterData;
+    type SkipFilter<'a>: SkipFilter = ();
+
     fn create_skip_filter<'a>(
-        // TODO: Custom object for the inputs of the function? immutable
-        // world?
-        _archetype: &'a mut Archetype,
-        _registry: &ComponentRegistry,
-        _tick: u32,
+        archetype: &'a mut Archetype,
+        registry: &ComponentRegistry,
+        tick: u32,
     ) -> Option<Self::SkipFilter<'a>> {
         None
     }
-
-    fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {}
 }
 
 pub trait SkipFilter {
     fn should_skip(&mut self) -> bool;
+    fn skip_rows(&mut self, count: usize) {
+        for _ in 0..count {
+            let _ = self.should_skip();
+        }
+    }
 }
 
 impl SkipFilter for () {
@@ -735,19 +818,31 @@ impl SkipFilter for () {
     }
 }
 
-// Default filter: () -> Matches everything
-impl Filter for () {
+// Unit ()
+impl FilterData for () {
     fn populate_requirements(
         _: &mut ComponentRegistry,
         _: &mut Vec<ComponentId>,
         _: &mut Vec<ComponentId>,
     ) {
     }
+    fn borrow_columns(_: &ComponentRegistry, _: &mut ColumnBorrowChecker) {}
+}
+impl Filter for () {
+    type Persistent = ();
+    type SkipFilter<'a> = ();
+    fn create_skip_filter<'a>(
+        _: &'a mut Archetype,
+        _: &ComponentRegistry,
+        _: u32,
+    ) -> Option<Self::SkipFilter<'a>> {
+        None
+    }
 }
 
-// With<T>: Requires T present
-pub struct With<T>(PhantomData<T>);
-impl<T: Component> Filter for With<T> {
+// With<T>
+pub struct WithData<T>(PhantomData<T>);
+impl<T: Component> FilterData for WithData<T> {
     fn populate_requirements(
         registry: &mut ComponentRegistry,
         required: &mut Vec<ComponentId>,
@@ -755,11 +850,21 @@ impl<T: Component> Filter for With<T> {
     ) {
         required.push(registry.register::<T>());
     }
+    fn borrow_columns(_: &ComponentRegistry, _: &mut ColumnBorrowChecker) {}
 }
 
-// Without<T>: Requires T absent
-pub struct Without<T>(PhantomData<T>);
-impl<T: Component> Filter for Without<T> {
+pub struct With<T>(PhantomData<T>);
+impl<T: Component> Filter for With<T> {
+    type Persistent = WithData<T>;
+    type SkipFilter<'a> = ();
+    fn create_skip_filter<'a>(_: &'a mut Archetype, _: &ComponentRegistry, _: u32) -> Option<()> {
+        None
+    }
+}
+
+// Without<T>
+pub struct WithoutData<T>(PhantomData<T>);
+impl<T: Component> FilterData for WithoutData<T> {
     fn populate_requirements(
         registry: &mut ComponentRegistry,
         _: &mut Vec<ComponentId>,
@@ -767,21 +872,23 @@ impl<T: Component> Filter for Without<T> {
     ) {
         excluded.push(registry.register::<T>());
     }
+    fn borrow_columns(_: &ComponentRegistry, _: &mut ColumnBorrowChecker) {}
+}
+
+pub struct Without<T>(PhantomData<T>);
+impl<T: Component> Filter for Without<T> {
+    type Persistent = WithoutData<T>;
+    type SkipFilter<'a> = ();
+    fn create_skip_filter<'a>(_: &'a mut Archetype, _: &ComponentRegistry, _: u32) -> Option<()> {
+        None
+    }
 }
 
 // AND<T, U>: Combines two filters with AND logic
 pub struct And<T, U>(PhantomData<(T, U)>);
 impl<T: Filter, U: Filter> Filter for And<T, U> {
     type SkipFilter<'a> = AndSkip<T::SkipFilter<'a>, U::SkipFilter<'a>>;
-
-    fn populate_requirements(
-        registry: &mut ComponentRegistry,
-        required: &mut Vec<ComponentId>,
-        excluded: &mut Vec<ComponentId>,
-    ) {
-        T::populate_requirements(registry, required, excluded);
-        U::populate_requirements(registry, required, excluded);
-    }
+    type Persistent = And<T::Persistent, U::Persistent>;
 
     #[inline(always)]
     fn create_skip_filter<'a>(
@@ -798,7 +905,17 @@ impl<T: Filter, U: Filter> Filter for And<T, U> {
         let u_filter = U::create_skip_filter(archetype_2, registry, tick)?;
         Some(AndSkip(t_filter, u_filter))
     }
+}
 
+impl<T: FilterData, U: FilterData> FilterData for And<T, U> {
+    fn populate_requirements(
+        registry: &mut ComponentRegistry,
+        required: &mut Vec<ComponentId>,
+        excluded: &mut Vec<ComponentId>,
+    ) {
+        T::populate_requirements(registry, required, excluded);
+        U::populate_requirements(registry, required, excluded);
+    }
     fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {
         T::borrow_columns(registry, checker);
         U::borrow_columns(registry, checker);
@@ -811,37 +928,21 @@ impl<T: SkipFilter, U: SkipFilter> SkipFilter for AndSkip<T, U> {
     fn should_skip(&mut self) -> bool {
         self.0.should_skip() || self.1.should_skip()
     }
+
+    fn skip_rows(&mut self, count: usize) {
+        self.0.skip_rows(count);
+        self.1.skip_rows(count);
+    }
 }
 
-pub struct Changed<T>(PhantomData<T>);
-
-impl<T: Component> Filter for Changed<T> {
-    type SkipFilter<'a> = ChangedSkipFilter<T>;
-
+pub struct ChangedData<T>(PhantomData<T>);
+impl<T: Component> FilterData for ChangedData<T> {
     fn populate_requirements(
         registry: &mut ComponentRegistry,
         required: &mut Vec<ComponentId>,
         _: &mut Vec<ComponentId>,
     ) {
         required.push(registry.register::<T>());
-    }
-
-    #[inline(always)]
-    fn create_skip_filter<'a>(
-        archetype: &'a mut Archetype,
-        registry: &ComponentRegistry,
-        tick: u32,
-    ) -> Option<Self::SkipFilter<'a>> {
-        let id = registry.get_id::<T>()?;
-        let column = archetype.column(id)?;
-
-        let ptr = column.get_ticks_ptr();
-
-        return Some(ChangedSkipFilter::<T> {
-            change_tick: tick,
-            changed_ptr: ptr,
-            _marker: PhantomData,
-        });
     }
     fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {
         checker.borrow(registry.get_id::<T>().expect("Component not registered"));
@@ -853,561 +954,441 @@ pub struct ChangedSkipFilter<T: Component> {
     changed_ptr: *const u32,
     _marker: PhantomData<T>,
 }
-
 impl<T: Component> SkipFilter for ChangedSkipFilter<T> {
     #[inline(always)]
     fn should_skip(&mut self) -> bool {
-        // SAFETY: changed_ptr is valid and points to a u32.
-        // This is guaranteed by the ChangedSkipFilter struct.
         let last_changed = unsafe { *self.changed_ptr };
-        // SAFETY: Caller must ensure we only call this len times.
         unsafe { self.changed_ptr = self.changed_ptr.add(1) };
         last_changed < self.change_tick
     }
 }
 
+pub struct Changed<T>(PhantomData<T>);
+impl<T: Component> Filter for Changed<T> {
+    type Persistent = ChangedData<T>;
+    type SkipFilter<'a> = ChangedSkipFilter<T>;
+
+    fn create_skip_filter<'a>(
+        archetype: &'a mut Archetype,
+        registry: &ComponentRegistry,
+        tick: u32,
+    ) -> Option<Self::SkipFilter<'a>> {
+        let id = registry.get_id::<T>()?;
+        let column = archetype.column_mut(id)?;
+        let ptr = column.get_ticks_ptr();
+        Some(ChangedSkipFilter {
+            change_tick: tick,
+            changed_ptr: ptr,
+            _marker: PhantomData,
+        })
+    }
+}
+
 // --- Tuple Implementation (Recursion) ---
 
-/// Imagine macro parameters, but more like those Russian dolls.
-///
-/// Calls m!(), m!(A 1), m!(A 1, B 2), and m!(A 1, B 2, C 3) for i.e. (m, A 1, B 2, C 3)
-/// where m is any macro, for any number of parameters.
-macro_rules! impl_all_tuples {
-    // Entry point: We need at least two items (A and B) to start the sequence
-    (
-        $callback:ident,
-        $first_name:ident $first_idx:tt,
-        $second_name:ident $second_idx:tt
-        $(, $rest_name:ident $rest_idx:tt)*
-    ) => {
-        // 1. Generate for the first pair (A 0, B 1)
-        $callback!($first_name $first_idx, $second_name $second_idx);
-
-        // 2. Start the recursion with the first pair as the "base"
-        impl_all_tuples!(
-            @recurse
-            $callback,
-            ($first_name $first_idx, $second_name $second_idx) // Accumulator
-            $(, $rest_name $rest_idx)* // Remaining items
-        );
-    };
-
-    // Recursive Step: We have an accumulator and at least one new item to add
-    (
-        @recurse
-        $callback:ident,
-        ($($acc:tt)*), // Everything done so far
-        $next_name:ident $next_idx:tt // The next item to process
-        $(, $tail_name:ident $tail_idx:tt)* // Items left after this one
-    ) => {
-        // 1. Generate the callback with the Accumulated items + Next item
-        $callback!($($acc)*, $next_name $next_idx);
-
-        // 2. Recurse, moving "Next" into the accumulator
-        impl_all_tuples!(
-            @recurse
-            $callback,
-            ($($acc)*, $next_name $next_idx)
-            $(, $tail_name $tail_idx)*
-        );
-    };
-
-    // Base Case: Recursion ends when there are no "next" items left
-    (@recurse $callback:ident, ($($acc:tt)*) $(,)?) => {
-        // Done.
-    };
-}
-macro_rules! impl_query_token_tuple {
+macro_rules! impl_query_tuples {
     ($($name:ident $num:tt),*) => {
+        // Fetch & View (Already covered, but Fetch Tuple is needed)
         impl<'a, $($name),*> Fetch<'a> for ($($name,)*)
-        where
-            $($name: Fetch<'a>),*
-
+        where $($name: Fetch<'a>),*
         {
             type Item = ($($name::Item,)*);
-
             #[inline(always)]
             unsafe fn next(&mut self) -> Self::Item {
-                // SAFETY: Caller must ensure we only call this len times.
-                unsafe {
-                    (
-                        $(
-                            self.$num.next(),
-                        )*
-                    )
-                }
+                unsafe { ( $( self.$num.next(), )* ) }
             }
-
             #[inline(always)]
             unsafe fn get(&mut self, index: usize) -> Self::Item {
-                // SAFETY: Caller must ensure index < length.
-                unsafe {
-                    (
-                        $(
-                            self.$num.get(index),
-                        )*
-                    )
-                }
+                unsafe { ( $( self.$num.get(index), )* ) }
             }
-        }
-
-        impl<$($name: QueryToken),*> QueryToken for ($($name,)*) {
-            type View<'a> = ($($name::View<'a>,)*);
-
-            fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
-                $(
-                    $name::populate_ids(registry, out);
-                )*
+             #[inline(always)]
+            unsafe fn skip(&mut self, count: usize) {
+                unsafe { $( self.$num.skip(count); )* }
             }
         }
 
         impl<'a, $($name: View<'a>),*> View<'a> for ($($name,)*) {
             type Item = ($($name::Item,)*);
             type Fetch = ($($name::Fetch,)*);
-
-            fn create_fetch(
-                archetype: &'a mut Archetype,
-                registry: &ComponentRegistry,
-                tick: u32,
-            ) -> Option<Self::Fetch> {
-                // SAFETY: We trick the compiler to allow multiple mutable borrows of archetype.
-                // We rely on the fact that each $name accesses disjoint columns (runtime verified by AtomicBorrow).
-                let ptr = archetype as *mut Archetype;
-                Some((
-                    $(
-                        $name::create_fetch(unsafe { &mut *ptr }, registry, tick)?,
-                    )*
-                ))
+            fn create_fetch(arch: &'a mut Archetype, reg: &ComponentRegistry, tick: u32) -> Option<Self::Fetch> {
+                let ptr = arch as *mut Archetype;
+                Some(( $( $name::create_fetch(unsafe { &mut *ptr }, reg, tick)?, )* ))
             }
 
-            fn borrow_columns(
-                registry: &ComponentRegistry,
-                borrow_checker: &mut ColumnBorrowChecker,
-            ) {
-                $(
-                    $name::borrow_columns(registry, borrow_checker);
-                )*
+            fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker) {
+                $( $name::borrow_columns(registry, borrow_checker); )*
             }
         }
 
+        // QueryData Tuple
+        impl<$($name: QueryData),*> QueryData for ($($name,)*) {
+             fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
+                $( $name::populate_ids(registry, out); )*
+            }
+            fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker) {
+                $( $name::borrow_columns(registry, borrow_checker); )*
+            }
+        }
+
+        // QueryToken Tuple (The Bridge)
+        impl<$($name: QueryToken),*> QueryToken for ($($name,)*) {
+            type View<'a> = ($($name::View<'a>,)*);
+            type Persistent = ($($name::Persistent,)*);
+        }
+
+        // FilterData Tuple
+        impl<$($name: FilterData),*> FilterData for ($($name,)*) {
+             fn populate_requirements(reg: &mut ComponentRegistry, req: &mut Vec<ComponentId>, exc: &mut Vec<ComponentId>) {
+                $( $name::populate_requirements(reg, req, exc); )*
+            }
+            fn borrow_columns(reg: &ComponentRegistry, chk: &mut ColumnBorrowChecker) {
+                $( $name::borrow_columns(reg, chk); )*
+            }
+        }
+
+        // Filter Tuple
         impl<$($name: Filter),*> Filter for ($($name,)*) {
-            // The SkipFilter is a tuple of Options (one for each filter in the tuple)
+            type Persistent = ($($name::Persistent,)*);
             type SkipFilter<'a> = ($(Option<$name::SkipFilter<'a>>,)*);
 
-            fn populate_requirements(
-                registry: &mut ComponentRegistry,
-                req: &mut Vec<ComponentId>,
-                exc: &mut Vec<ComponentId>
-            ) {
-                $($name::populate_requirements(registry, req, exc);)*
-            }
-
-            #[inline(always)]
-            fn create_skip_filter<'a>(
-                archetype: &'a mut Archetype,
-                registry: &ComponentRegistry,
-                tick: u32,
-            ) -> Option<Self::SkipFilter<'a>> {
-                // SAFETY: We cast the pointer to allow multiple filters to borrow
-                // different columns from the same archetype.
-                // Runtime safety is handled by AtomicBorrow inside the sub-filters.
-                let ptr = archetype as *mut Archetype;
-
-                // We return a Tuple containing Options.
-                // We do NOT return None for the whole tuple here, because
-                // we need to hold onto whichever sub-filters were successfully created.
-                Some((
-                    $(
-                        $name::create_skip_filter(unsafe { &mut *ptr }, registry, tick),
-                    )*
-                ))
-            }
-
-            fn borrow_columns(
-                registry: &ComponentRegistry,
-                borrow_checker: &mut ColumnBorrowChecker,
-            ) {
-                $(
-                    $name::borrow_columns(registry, borrow_checker);
-                )*
+            fn create_skip_filter<'a>(arch: &'a mut Archetype, reg: &ComponentRegistry, tick: u32) -> Option<Self::SkipFilter<'a>> {
+                 let ptr = arch as *mut Archetype;
+                 Some(( $( $name::create_skip_filter(unsafe { &mut *ptr }, reg, tick), )* ))
             }
         }
 
-        // 5. Implement SkipFilter for the Tuple of Options (NEW)
-        // This allows the tuple generated above to function as a single SkipFilter.
+        // SkipFilter for Tuple Options
         impl<'a, $($name),*> SkipFilter for ($(Option<$name>,)*)
-        where
-            $($name: SkipFilter),*
+        where $($name: SkipFilter),*
         {
             #[inline(always)]
             fn should_skip(&mut self) -> bool {
-                // OR Logic: If ANY of the sub-filters says "skip", we return true.
-                // We iterate through the tuple indices.
                 $(
-                    // Check if this slot has a filter (Option::Some)
                     if let Some(filter) = &mut self.$num {
-                        if filter.should_skip() {
-                            return true;
-                        }
+                        if filter.should_skip() { return true; }
                     }
                 )*
                 false
             }
-
-
         }
+
     }
 }
 
 impl_all_tuples!(
-    impl_query_token_tuple, A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10, L 11, M 12, N 13);
+    impl_query_tuples, A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10, L 11, M 12, N 13);
 
 // ============================================================================
 // Test
 // ============================================================================
 
+/// A high-level wrapper around `QueryInner` that remembers the Dynamic types (Q, F).
+/// Useful for manual querying outside of systems (e.g., tests, scripts).
+pub struct QueryState<Q: QueryToken, F: Filter = ()> {
+    inner: QueryInner<Q::Persistent, F::Persistent>,
+    _marker: std::marker::PhantomData<(Q, F)>,
+}
+
+impl<Q: QueryToken, F: Filter> QueryState<Q, F> {
+    pub fn new(registry: &mut crate::component::ComponentRegistry) -> Self {
+        Self {
+            inner: QueryInner::new::<Q, F>(registry),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Iterates without needing explicit type annotations.
+    pub fn iter<'w>(
+        &'w mut self,
+        world: &'w mut crate::world::World,
+    ) -> QueryIter<'w, Q::View<'w>, F> {
+        self.inner.iter::<Q::View<'w>, F>(world)
+    }
+
+    pub fn for_each<'w, Func>(&'w mut self, world: &'w mut crate::world::World, func: Func)
+    where
+        Func: FnMut(<Q::View<'w> as crate::query::View<'w>>::Item),
+    {
+        self.inner.for_each::<Q::View<'w>, F, Func>(world, func)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::*; // Assuming Component, Entity, World are reachable
     use crate::world::World;
 
-    #[test]
-    fn test_query_iteration() {
-        let mut world = World::new();
+    // ========================================================================
+    // TEST HELPERS & COMPONENTS
+    // ========================================================================
 
-        world.spawn((10u32, 5.0f32));
-        world.spawn((20u32, 10.0f32));
-        world.spawn((30u32,));
-
-        let mut query = Query::<(&u32, &mut f32)>::new(&mut world.registry);
-
-        let mut count = 0;
-        for (pos, mut vel) in query.iter(&mut world) {
-            *vel += 1.0;
-            count += 1;
-            println!("Pos: {pos}, Vel: {}", *vel);
-        }
-
-        assert_eq!(count, 2);
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    struct Pos {
+        x: f32,
+        y: f32,
     }
 
-    #[test]
-    #[should_panic]
-    fn test_borrow_check() {
-        let mut world = World::new();
-        world.spawn((10u32,));
-
-        let mut q1 = Query::<(&mut u32, &u32)>::new(&mut world.registry);
-        // This should panic because we request &mut u32 and &u32 on the same component
-        q1.iter(&mut world).next();
-    }
-
-    #[test]
-    fn test_filters() {
-        let mut world = World::new();
-
-        // Entity 1: [u32, f32]
-        world.spawn((10u32, 1.0f32));
-
-        // Entity 2: [u32]
-        world.spawn((20u32,));
-
-        // Entity 3: [u32, f32, bool]
-        world.spawn((30u32, 2.0f32, true));
-
-        // Query: Give me u32, but ONLY if they don't have a bool (Without<bool>)
-        let mut query = Query::<&u32, Without<bool>>::new(&mut world.registry);
-
-        let mut count = 0;
-        for _val in query.iter(&mut world) {
-            count += 1;
-        }
-
-        // Should match E1 (has f32, no bool) and E2 (no bool).
-        // Should skip E3 (has bool).
-        assert_eq!(count, 2);
-    }
-
-    #[derive(Debug, PartialEq)]
-    struct Position {
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    struct Vel {
         x: f32,
         y: f32,
     }
 
     #[derive(Debug, PartialEq)]
-    struct Velocity {
-        dx: f32,
-        dy: f32,
-    }
-
-    #[derive(Debug, PartialEq)]
     struct Name(String);
 
-    // Tag components
+    // Marker Components
     struct Player;
     struct Enemy;
-    struct Frozen; // Status effect
+    struct Dead;
 
-    // ============================================================================
-    // Borrowing Rule Tests
-    // ============================================================================
-
-    #[test]
-    fn test_shared_borrow_allows_multiple_reads() {
-        let mut world = World::new();
-        world.spawn((Position { x: 0.0, y: 0.0 },));
-
-        // Requesting immutable access twice to the same component is valid
-        let mut query = Query::<(&Position, &Position)>::new(&mut world.registry);
-
-        let mut count = 0;
-        for (p1, p2) in query.iter(&mut world) {
-            assert_eq!(p1, p2);
-            count += 1;
-        }
-        assert_eq!(count, 1);
+    // ------------------------------------------------------------------------
+    // Helper: QueryState Wrapper
+    // This allows us to write `query.iter(&mut world)` without explicit types
+    // ------------------------------------------------------------------------
+    pub struct QueryState<Q: QueryToken, F: Filter = ()> {
+        inner: QueryInner<Q::Persistent, F::Persistent>,
+        _marker: std::marker::PhantomData<(Q, F)>,
     }
 
-    #[test]
-    #[should_panic(expected = "Runtime borrow conflict detected")]
-    fn test_borrow_rule_mut_mut_conflict() {
-        let mut world = World::new();
-        world.spawn((Position { x: 0.0, y: 0.0 },));
-
-        // Illegal: Two mutable references to the same component
-        let mut query = Query::<(&mut Position, &mut Position)>::new(&mut world.registry);
-
-        // Should panic immediately upon creating the fetch for the first matching archetype
-        query.iter(&mut world).next();
-    }
-
-    #[test]
-    #[should_panic(expected = "Runtime borrow conflict detected")]
-    fn test_borrow_rule_ref_mut_conflict() {
-        let mut world = World::new();
-        world.spawn((Position { x: 0.0, y: 0.0 },));
-
-        // Illegal: Aliasing rules (one mutable, one immutable)
-        let mut query = Query::<(&Position, &mut Position)>::new(&mut world.registry);
-
-        query.iter(&mut world).next();
-    }
-
-    #[test]
-    #[should_panic(expected = "Runtime borrow conflict detected")]
-    fn test_borrow_rule_mut_ref_conflict() {
-        let mut world = World::new();
-        world.spawn((Position { x: 0.0, y: 0.0 },));
-
-        // Illegal: Aliasing rules (flipped order)
-        let mut query = Query::<(&mut Position, &Position)>::new(&mut world.registry);
-
-        query.iter(&mut world).next();
-    }
-
-    // ============================================================================
-    // Complex Filter Tests
-    // ============================================================================
-
-    #[test]
-    fn test_complex_tuple_filters() {
-        let mut world = World::new();
-
-        // Archetype 1: Player, Pos, Vel (Matches)
-        world.spawn((
-            Player,
-            Position { x: 0.0, y: 0.0 },
-            Velocity { dx: 1.0, dy: 0.0 },
-        ));
-
-        // Archetype 2: Enemy, Pos, Vel (Filtered out by With<Player>)
-        world.spawn((
-            Enemy,
-            Position { x: 10.0, y: 10.0 },
-            Velocity { dx: 0.0, dy: 0.0 },
-        ));
-
-        // Archetype 3: Player, Pos, Vel, Frozen (Filtered out by Without<Frozen>)
-        world.spawn((
-            Player,
-            Position { x: 0.0, y: 0.0 },
-            Velocity { dx: 0.0, dy: 0.0 },
-            Frozen,
-        ));
-
-        // Archetype 4: Player, Pos (Filtered out, missing Velocity required by View)
-        world.spawn((Player, Position { x: 5.0, y: 5.0 }));
-
-        // Logic: Has Position + Velocity AND is a Player AND is NOT Frozen
-        // The tuple (With<Player>, Without<Frozen>) acts as an AND gate.
-        let mut query = Query::<(&Position, &Velocity), (With<Player>, Without<Frozen>)>::new(
-            &mut world.registry,
-        );
-
-        let mut count = 0;
-        for (_pos, _vel) in query.iter(&mut world) {
-            count += 1;
-        }
-
-        assert_eq!(count, 1, "Only Archetype 1 should match");
-    }
-
-    #[test]
-    fn test_disjoint_filter_sets() {
-        let mut world = World::new();
-
-        world.spawn((10u32, "A")); // 1. Missing B (f32)
-        world.spawn((20u32, 1.0f32)); // 2. Has A, B. No C. MATCH.
-        world.spawn((30u32, 2.0f32, true)); // 3. Has A, B. Has C (bool). FAIL.
-        world.spawn((40u32, 3.0f32, "D")); // 4. Has A, B. No C. MATCH.
-
-        // Query: Give me u32. Must have f32. Must NOT have bool.
-        let mut query = Query::<&u32, (With<f32>, Without<bool>)>::new(&mut world.registry);
-
-        let results: Vec<u32> = query.iter(&mut world).copied().collect();
-
-        // Should match 20 and 40.
-        assert_eq!(results.len(), 2);
-        assert!(results.contains(&20));
-        assert!(results.contains(&40));
-    }
-
-    // ============================================================================
-    // Custom Data Structures & Mutation
-    // ============================================================================
-
-    #[test]
-    fn test_mutation_of_complex_structs() {
-        let mut world = World::new();
-
-        // Spawn 100 entities with positions
-        for i in 0..100 {
-            world.spawn((
-                Position {
-                    x: i as f32,
-                    y: 0.0,
-                },
-                Velocity { dx: 1.0, dy: 1.0 },
-            ));
-        }
-
-        // System: Update Position based on Velocity
-        {
-            let mut query = Query::<(&mut Position, &Velocity)>::new(&mut world.registry);
-            for (mut pos, vel) in query.iter(&mut world) {
-                pos.x += vel.dx;
-                pos.y += vel.dy;
+    impl<Q: QueryToken, F: Filter> QueryState<Q, F> {
+        pub fn new(world: &mut World) -> Self {
+            Self {
+                inner: QueryInner::new::<Q, F>(&mut world.registry),
+                _marker: std::marker::PhantomData,
             }
         }
 
-        // Validation
-        let mut query = Query::<&Position>::new(&mut world.registry);
-        let mut check_count = 0;
-        for pos in query.iter(&mut world) {
-            // x was 'i', dx was 1.0. So new x should be > 0.0
-            assert!(pos.x >= 1.0);
-            assert_eq!(pos.y, 1.0);
-            check_count += 1;
-        }
-        assert_eq!(check_count, 100);
-    }
-
-    #[test]
-    fn test_heap_allocated_components() {
-        let mut world = World::new();
-
-        world.spawn((Name("Alice".to_string()), 1u32));
-        world.spawn((Name("Bob".to_string()), 2u32));
-        world.spawn((3u32,)); // No name
-
-        let mut query = Query::<(&Name, &mut u32)>::new(&mut world.registry);
-
-        let mut found_names = Vec::new();
-
-        for (name, mut score) in query.iter(&mut world) {
-            found_names.push(name.0.clone());
-            *score += 10;
+        pub fn iter<'w>(&'w mut self, world: &'w mut World) -> QueryIter<'w, Q::View<'w>, F> {
+            self.inner.iter::<Q::View<'w>, F>(world)
         }
 
-        found_names.sort();
-        assert_eq!(found_names, vec!["Alice", "Bob"]);
-
-        // Verify mutations persisted
-        let mut check_q = Query::<&u32>::new(&mut world.registry);
-        let scores: Vec<u32> = check_q.iter(&mut world).cloned().collect();
-
-        // 1 + 10 = 11, 2 + 10 = 12, 3 + 0 = 3
-        assert!(scores.contains(&11));
-        assert!(scores.contains(&12));
-        assert!(scores.contains(&3));
+        pub fn get<'w>(
+            &'w mut self,
+            world: &'w mut World,
+            entity: Entity,
+        ) -> Option<GetGuard<'w, <Q::View<'w> as View<'w>>::Item>> {
+            self.inner.get::<Q::View<'w>, F>(world, entity)
+        }
     }
 
-    // ============================================================================
-    // Multi-Archetype Iteration Edge Cases
-    // ============================================================================
+    // ========================================================================
+    // 1. BASIC ITERATION & DATA ACCESS
+    // ========================================================================
 
     #[test]
-    fn test_scattered_archetypes() {
+    fn test_basic_iteration() {
         let mut world = World::new();
 
-        // Create fragmentation in storage
-        world.spawn((1u32, 1.0f32)); // Arch 1
-        world.spawn((2u32,)); // Arch 2 (Skipped)
-        world.spawn((3u32, 2.0f32, false)); // Arch 3
-        world.spawn((4u32, 3.0f32, "dummy")); // Arch 4
+        // Archetype 1: Pos, Vel
+        world.spawn((Pos { x: 0.0, y: 0.0 }, Vel { x: 1.0, y: 1.0 }));
+        // Archetype 2: Pos (No Vel) - Should be skipped
+        world.spawn((Pos { x: 10.0, y: 10.0 },));
+        // Archetype 3: Pos, Vel, Player
+        world.spawn((Pos { x: 5.0, y: 5.0 }, Vel { x: 0.0, y: 1.0 }, Player));
 
-        // Query matches Arch 1, 3, and 4 (all have u32 and f32)
-        let mut query = Query::<(&u32, &mut f32)>::new(&mut world.registry);
+        let mut query = QueryState::<(&Pos, &Vel)>::new(&mut world);
 
         let mut count = 0;
-        let mut sum_ids = 0;
-
-        for (id, _val) in query.iter(&mut world) {
+        for (pos, vel) in query.iter(&mut world) {
+            // Check data logic
+            if pos.x == 0.0 {
+                assert_eq!(vel.x, 1.0);
+            }
+            if pos.x == 5.0 {
+                assert_eq!(vel.y, 1.0);
+            }
             count += 1;
-            sum_ids += *id;
         }
 
-        assert_eq!(count, 3);
-        assert_eq!(sum_ids, 1 + 3 + 4);
+        assert_eq!(count, 2, "Should match Arch 1 and Arch 3, skip Arch 2");
     }
 
-    // ============================================================================
-    // get() Method Tests
-    // ============================================================================
+    #[test]
+    fn test_mutation() {
+        let mut world = World::new();
+        world.spawn((Pos { x: 0.0, y: 0.0 }, Vel { x: 1.0, y: 2.0 }));
+
+        let mut query = QueryState::<(&mut Pos, &Vel)>::new(&mut world);
+
+        // Apply Velocity
+        for (mut pos, vel) in query.iter(&mut world) {
+            pos.x += vel.x;
+            pos.y += vel.y;
+        }
+
+        // Verify result with immutable query
+        let mut check = QueryState::<&Pos>::new(&mut world);
+        let pos = check.iter(&mut world).next().unwrap();
+
+        assert_eq!(pos.x, 1.0);
+        assert_eq!(pos.y, 2.0);
+    }
 
     #[test]
-    fn test_query_get_method() {
+    fn test_random_access_get() {
         let mut world = World::new();
+        let e1 = world.spawn((10u32, 5.0f32)); // Matches
+        let e2 = world.spawn((20u32,)); // Misses (missing f32)
 
-        let e1 = world.spawn((10u32, 5.0f32)); // Matches query
-        let e2 = world.spawn((20u32,)); // Missing f32, should not match
+        let mut query = QueryState::<(&mut u32, &f32)>::new(&mut world);
 
-        let mut query = Query::<(&u32, &mut f32)>::new(&mut world.registry);
-
-        // Test get for matching entity
-        if let Some((pos, mut vel)) = query.get(&mut world, e1) {
-            assert_eq!(*pos, 10);
-            *vel += 2.0;
-            assert_eq!(*vel, 7.0);
+        // Test Match
+        if let Some(mut guard) = query.get(&mut world, e1) {
+            let (val, _) = &mut *guard;
+            **val += 100;
         } else {
-            panic!("Entity e1 should match the query");
+            panic!("Entity 1 should match");
         }
 
-        // Test get for non-matching entity
-        assert!(query.get(&mut world, e2).is_none());
+        // Verify mutation
+        if let Some(guard) = query.get(&mut world, e1) {
+            assert_eq!(*guard.0, 110);
+        }
+
+        // Test Mismatch
+        assert!(
+            query.get(&mut world, e2).is_none(),
+            "Entity 2 missing component"
+        );
+
+        // Test Despawned
+        world.despawn(e1);
+        assert!(query.get(&mut world, e1).is_none(), "Entity 1 is dead");
+    }
+
+    // ========================================================================
+    // 2. FILTERS (With, Without, And)
+    // ========================================================================
+
+    #[test]
+    fn test_filters_with_without() {
+        let mut world = World::new();
+
+        // A: Player
+        world.spawn((Player, Pos { x: 1.0, y: 0.0 }));
+        // B: Enemy
+        world.spawn((Enemy, Pos { x: 2.0, y: 0.0 }));
+        // C: Player + Dead
+        world.spawn((Player, Dead, Pos { x: 3.0, y: 0.0 }));
+
+        // Query: Get Pos for Players who are NOT Dead
+        let mut query = QueryState::<&Pos, (With<Player>, Without<Dead>)>::new(&mut world);
+
+        let results: Vec<f32> = query.iter(&mut world).map(|p| p.x).collect();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], 1.0);
     }
 
     #[test]
-    fn test_query_get_nonexistent_entity() {
+    fn test_complex_and_filters() {
         let mut world = World::new();
-        let e1 = world.spawn((10u32, 5.0f32));
+        // Matches: Has Pos, Vel, Player. Does NOT have Dead.
+        world.spawn((Pos { x: 0., y: 0. }, Vel { x: 0., y: 0. }, Player));
+        // Fails: Missing Player
+        world.spawn((Pos { x: 0., y: 0. }, Vel { x: 0., y: 0. }));
+        // Fails: Has Dead
+        world.spawn((Pos { x: 0., y: 0. }, Vel { x: 0., y: 0. }, Player, Dead));
 
-        let mut query = Query::<(&u32, &mut f32)>::new(&mut world.registry);
+        // Logic: (With<Player> AND Without<Dead>)
+        // Note: Tuple filters imply AND logic.
+        let mut query = QueryState::<(&Pos, &Vel), (With<Player>, Without<Dead>)>::new(&mut world);
 
-        // Despawn entity
-        world.despawn(e1);
+        assert_eq!(query.iter(&mut world).count(), 1);
+    }
 
-        // Test get for despawned entity
-        assert!(query.get(&mut world, e1).is_none());
+    // ========================================================================
+    // 3. CHANGE DETECTION
+    // ========================================================================
+
+    // ========================================================================
+    // 4. STRUCTURAL DYNAMICS
+    // ========================================================================
+
+    #[test]
+    fn test_archetype_fragmentation() {
+        let mut world = World::new();
+        let mut query = QueryState::<&Pos>::new(&mut world);
+
+        // 1. Spawn Arch A
+        world.spawn((Pos { x: 1.0, y: 0.0 },));
+        assert_eq!(query.iter(&mut world).count(), 1);
+
+        // 2. Spawn Arch B (Added component)
+        world.spawn((Pos { x: 2.0, y: 0.0 }, Vel { x: 0.0, y: 0.0 }));
+        // Query must update cache internally
+        assert_eq!(query.iter(&mut world).count(), 2);
+
+        // 3. Spawn Arch C (Different component)
+        world.spawn((Pos { x: 3.0, y: 0.0 }, Name("Bob".into())));
+        assert_eq!(query.iter(&mut world).count(), 3);
+    }
+
+    #[test]
+    fn test_scattered_memory() {
+        // Ensure iteration works across disparate archetypes
+        let mut world = World::new();
+        world.spawn((1u32,)); // Match
+        world.spawn((1.0f32,)); // Miss
+        world.spawn((2u32, true)); // Match
+        world.spawn((3u32, "Str")); // Match
+
+        let mut query = QueryState::<&u32>::new(&mut world);
+        let sum: u32 = query.iter(&mut world).sum();
+
+        assert_eq!(sum, 1 + 2 + 3);
+    }
+
+    // ========================================================================
+    // 5. SAFETY & BORROW RULES
+    // ========================================================================
+
+    #[test]
+    #[should_panic(expected = "Runtime borrow conflict detected")]
+    fn test_panic_mut_mut_aliasing() {
+        let mut world = World::new();
+        world.spawn((Pos { x: 0., y: 0. },));
+
+        // Cannot borrow &mut Pos and &mut Pos
+        let mut query = QueryState::<(&mut Pos, &mut Pos)>::new(&mut world);
+        query.iter(&mut world);
+    }
+
+    #[test]
+    #[should_panic(expected = "Runtime borrow conflict detected")]
+    fn test_panic_mut_ref_aliasing() {
+        let mut world = World::new();
+        world.spawn((Pos { x: 0., y: 0. },));
+
+        // Cannot borrow &mut Pos and &Pos
+        let mut query = QueryState::<(&mut Pos, &Pos)>::new(&mut world);
+        query.iter(&mut world);
+    }
+
+    #[test]
+    fn test_safe_ref_ref_aliasing() {
+        let mut world = World::new();
+        world.spawn((Pos { x: 10., y: 10. },));
+
+        // Shared access is fine
+        let mut query = QueryState::<(&Pos, &Pos)>::new(&mut world);
+        for (p1, p2) in query.iter(&mut world) {
+            assert_eq!(p1, p2);
+        }
+    }
+
+    // ========================================================================
+    // 6. ZST & EMPTY STRUCTS
+    // ========================================================================
+    #[test]
+    fn test_zst_component() {
+        let mut world = World::new();
+        world.spawn((10u32, Dead));
+        world.spawn((20u32,));
+
+        let mut query = QueryState::<(&u32, &Dead)>::new(&mut world);
+        let count = query.iter(&mut world).count();
+        assert_eq!(count, 1);
     }
 }

@@ -2,9 +2,24 @@ use crate::component::{ComponentId, ComponentMask, ComponentRegistry};
 use crate::entity::Entity;
 use crate::storage::Column;
 use std::collections::HashMap;
+use std::ops::Deref;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ArchetypeId(pub u32);
+pub struct ArchetypeId(pub usize);
+
+impl ArchetypeId {
+    pub fn new(id: usize) -> Self {
+        ArchetypeId(id)
+    }
+}
+
+impl Deref for ArchetypeId {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 pub struct Archetype {
     pub id: ArchetypeId,
@@ -89,9 +104,14 @@ impl Archetype {
         }
     }
 
-    /// Helper to access a specific column safely
-    pub fn column(&mut self, id: ComponentId) -> Option<&mut Column> {
+    /// Helper to access a specific column safely and mutably
+    pub fn column_mut(&mut self, id: ComponentId) -> Option<&mut Column> {
         self.columns.get_mut(&id)
+    }
+
+    /// Helper to access a specific column safely
+    pub fn column(&self, id: ComponentId) -> Option<&Column> {
+        self.columns.get(&id)
     }
 
     /// Helper to Borrow a specific column
@@ -99,7 +119,7 @@ impl Archetype {
     pub fn borrow_column(&self, id: ComponentId) -> bool {
         self.columns
             .get(&id)
-            .map_or(false, |c| c.borrow_state().borrow())
+            .is_some_and(|c| c.borrow_state().borrow())
     }
 
     /// Helper to borrow a specific column mutably
@@ -107,7 +127,7 @@ impl Archetype {
     pub fn borrow_column_mut(&self, id: ComponentId) -> bool {
         self.columns
             .get(&id)
-            .map_or(false, |c| c.borrow_state().borrow_mut())
+            .is_some_and(|c| c.borrow_state().borrow_mut())
     }
 
     /// Releases a previously borrowed column
@@ -147,8 +167,8 @@ mod tests {
 
         // Manually push data to columns (simulating what World will do)
         unsafe {
-            arch.column(pos_id).unwrap().push(100u32, 0);
-            arch.column(vel_id).unwrap().push(1.0f32, 0);
+            arch.column_mut(pos_id).unwrap().push(100u32, 0);
+            arch.column_mut(vel_id).unwrap().push(1.0f32, 0);
         }
 
         assert_eq!(arch.len(), 1);

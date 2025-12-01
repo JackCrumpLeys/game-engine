@@ -1,5 +1,6 @@
 use std::alloc::{self, Layout};
 use std::ptr::{self, NonNull, drop_in_place};
+use std::sync::Arc;
 
 use crate::borrow::AtomicBorrow;
 

@@ -23,11 +23,11 @@ macro_rules! define_component_mask {
         /// A bitmask that fits the configured max components.
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
         pub struct $name {
-            bits: [u64; ($max_components + 63) / 64],
+            bits: [u64; MAX_COMPONENTS.div_ceil(64)],
         }
 
         impl $name {
-            pub const WORD_COUNT: usize = ($max_components + 63) / 64;
+            pub const WORD_COUNT: usize = MAX_COMPONENTS.div_ceil(64);
             pub const CAPACITY: usize = $max_components;
 
             #[inline(always)]
@@ -241,7 +241,7 @@ mod tests {
         mask.set(63); // Edge of first u64
 
         // Test custom Debug output
-        let debug_str = format!("{:?}", mask);
+        let debug_str = format!("{mask:?}");
         assert_eq!(debug_str, "[1, 63]");
 
         // Test Helpers

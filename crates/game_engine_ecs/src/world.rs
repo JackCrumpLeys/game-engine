@@ -2,7 +2,7 @@ use crate::archetype::{Archetype, ArchetypeId};
 use crate::bundle::Bundle;
 use crate::component::{ComponentId, ComponentRegistry};
 use crate::entity::{Entities, Entity};
-use crate::query::{Filter, Query, QueryToken};
+use crate::query::{Filter, QueryInner, QueryToken};
 use crate::resource::Resources;
 use std::collections::HashMap;
 use std::ops::{Deref, Index, IndexMut};
@@ -39,6 +39,12 @@ pub struct ArchetypeStore(Vec<Archetype>);
 
 /// By not using a Vec directly, we can later change the storage strategy
 /// We also define only 2 mutating methods: push and index_mut
+impl Default for ArchetypeStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ArchetypeStore {
     pub fn new() -> Self {
         ArchetypeStore(Vec::new())
@@ -134,12 +140,16 @@ impl World {
         ent
     }
 
-    pub fn query<Q: QueryToken, F: Filter>(&mut self) -> Query<Q, F> {
-        Query::new(&mut self.registry)
+    pub fn query<Q: QueryToken, F: Filter>(&mut self) -> QueryInner<Q::Persistent, F::Persistent> {
+        QueryInner::new::<Q, F>(&mut self.registry)
     }
 
-    pub fn resources(&mut self) -> &mut Resources {
+    pub fn resources_mut(&mut self) -> &mut Resources {
         &mut self.resources
+    }
+
+    pub fn resources(&self) -> &Resources {
+        &self.resources
     }
 
     pub fn increment_tick(&mut self) {
@@ -194,7 +204,7 @@ impl World {
             return id;
         }
 
-        let id = ArchetypeId(self.archetypes.len() as u32);
+        let id = ArchetypeId(self.archetypes.len());
         let archetype = Archetype::new(id, comp_ids.clone(), &self.registry);
         self.archetypes.push(archetype);
         self.archetype_index.insert(comp_ids, id);

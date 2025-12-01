@@ -59,6 +59,12 @@ impl Resources {
         // }
     }
 
+    pub fn register<R: Resource + Default>(&mut self) {
+        self.map
+            .entry(TypeId::of::<R>())
+            .or_insert_with(|| ResourceCell::new(Box::new(R::default())));
+    }
+
     /// Gets an immutable reference to a resource of type R.
     /// panics if the resource is already mutably borrowed.
     pub fn get<R: Resource>(&'_ self) -> Option<Res<'_, R>> {
@@ -108,6 +114,24 @@ impl Resources {
                 borrow: &cell.borrow,
             }
         })
+    }
+
+    /// Get or insert default resource of type R.
+    pub fn get_or_insert_default<R: Resource + Default>(&mut self) -> Res<'_, R> {
+        if !self.map.contains_key(&TypeId::of::<R>()) {
+            self.insert(R::default());
+        }
+        self.get::<R>()
+            .expect("Just inserted resource, should be present")
+    }
+
+    /// Get or insert default mutable resource of type R.
+    pub fn get_mut_or_insert_default<R: Resource + Default>(&mut self) -> ResMut<'_, R> {
+        if !self.map.contains_key(&TypeId::of::<R>()) {
+            self.insert(R::default());
+        }
+        self.get_mut::<R>()
+            .expect("Just inserted resource, should be present")
     }
 }
 

@@ -1,6 +1,8 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use game_engine_ecs::component::Component;
-use game_engine_ecs::query::{Query, With, Without};
+#![allow(dead_code)]
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
+use game_engine_ecs::query::{QueryInner, QueryState, With};
 use game_engine_ecs::world::World;
 
 // ============================================================================
@@ -82,7 +84,7 @@ fn heavy_compute_simd(c: &mut Criterion) {
 
     // ECS Benchmark
     group.bench_function("ECS", |b| {
-        let mut query = Query::<(&mut Position, &TransformMatrix)>::new(&mut world.registry);
+        let mut query = QueryState::<(&mut Position, &TransformMatrix)>::new(&mut world.registry);
         b.iter(|| {
             query_iteration(&mut world, &mut query);
         });
@@ -178,7 +180,7 @@ fn archetype_fragmentation(c: &mut Criterion) {
     }
 
     group.bench_function("ECS: Fragmented Iteration", |b| {
-        let mut query = Query::<(&mut Position, &Velocity)>::new(&mut world.registry);
+        let mut query = QueryState::<(&mut Position, &Velocity)>::new(&mut world.registry);
         b.iter(|| {
             query.for_each(&mut world, |(mut pos, vel)| {
                 pos.x += vel.dx;
@@ -226,7 +228,7 @@ fn cache_locality_soa_vs_aos(c: &mut Criterion) {
 
     group.bench_function("ECS (SoA): Skip Bloat", |b| {
         // We ONLY request Position. The MeshData should be in a separate array.
-        let mut query = Query::<&mut Position>::new(&mut world.registry);
+        let mut query = QueryState::<&mut Position>::new(&mut world.registry);
         b.iter(|| {
             query.for_each(&mut world, |mut pos| {
                 pos.x += 1.0;
@@ -271,7 +273,7 @@ fn filtering_logic(c: &mut Criterion) {
 
     group.bench_function("ECS: With<TagA>", |b| {
         // Should only iterate 10,000 entities
-        let mut query = Query::<&mut Position, With<TagA>>::new(&mut world.registry);
+        let mut query = QueryState::<&mut Position, With<TagA>>::new(&mut world.registry);
         b.iter(|| {
             query.for_each(&mut world, |mut pos| {
                 pos.x += 1.0;
@@ -286,7 +288,7 @@ fn filtering_logic(c: &mut Criterion) {
 #[inline(never)]
 fn query_iteration(
     world: &mut World,
-    query: &mut Query<(&'static mut Position, &'static TransformMatrix)>,
+    query: &mut QueryState<(&'static mut Position, &'static TransformMatrix)>,
 ) {
     query.for_each(world, |(mut pos, mat)| {
         // heavy math: Matrix multiplication simulation
