@@ -1,4 +1,4 @@
-mod function;
+pub mod function;
 
 use crate::archetype::ArchetypeId;
 use crate::borrow::ColumnBorrowChecker;
@@ -99,10 +99,6 @@ pub trait System: Send + Sync + 'static {
     /// Updates dynamic access (archetypes).
     /// Returns true if access changed.
     fn update_access(&mut self, world: &World) -> bool;
-}
-
-pub trait IntoSystem<Params> {
-    fn into_system(self) -> Box<dyn System>;
 }
 
 /// A parameter that can be passed into a system function.

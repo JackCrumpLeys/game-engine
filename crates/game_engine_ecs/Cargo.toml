@@ -19,3 +19,7 @@ codegen-units = 1
 [[bench]]
 name = "iter_bench"
 harness = false
+
+[[bench]]
+name = "system_ecs_vs_vec"
+harness = false
