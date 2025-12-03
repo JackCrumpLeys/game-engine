@@ -2,7 +2,7 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use game_engine_ecs::query::{QueryInner, QueryState, With};
+use game_engine_ecs::query::{QueryState, With};
 use game_engine_ecs::world::World;
 
 // ============================================================================

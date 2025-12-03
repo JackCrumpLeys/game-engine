@@ -1,7 +1,6 @@
 // Thanks to https://github.com/Ralith/hecs/blob/master/src/borrow.rs
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use std::collections::HashMap;
 
 use crate::{archetype::Archetype, component::ComponentMask, prelude::ComponentId};
 /// A bit mask used to signal the `AtomicBorrow` has an active mutable borrow.
@@ -190,11 +189,10 @@ impl ColumnBorrowChecker {
                 if let Some(col) = arch.column(id) {
                     result.push((col.borrow_state(), true));
                 }
-            } else if self.borrows.has(id.0) {
-                if let Some(col) = arch.column(id) {
+            } else if self.borrows.has(id.0)
+                && let Some(col) = arch.column(id) {
                     result.push((col.borrow_state(), false));
                 }
-            }
         }
 
         result
@@ -204,7 +202,7 @@ impl ColumnBorrowChecker {
     /// panics on conflict.
     pub fn borrow(&mut self, comp_id: ComponentId) {
         if !self.try_borrow(comp_id, false) {
-            panic!("conflicting borrow detected for component {:?}", comp_id);
+            panic!("conflicting borrow detected for component {comp_id:?}");
         }
     }
 
@@ -213,8 +211,7 @@ impl ColumnBorrowChecker {
     pub fn borrow_mut(&mut self, comp_id: ComponentId) {
         if !self.try_borrow(comp_id, true) {
             panic!(
-                "conflicting mutable borrow detected for component {:?}",
-                comp_id
+                "conflicting mutable borrow detected for component {comp_id:?}"
             );
         }
     }

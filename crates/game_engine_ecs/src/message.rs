@@ -1,4 +1,3 @@
-use std::ops::DerefMut;
 use std::{marker::PhantomData, ops::Deref};
 
 use crate::prelude::{Res, ResMut, Resource};
@@ -51,6 +50,7 @@ impl<T: Message> MessageQueue<T> {
         self.back_buffer.push(message);
     }
 
+    #[allow(dead_code)] // TODO
     pub fn swap_buffers(&mut self) {
         self.lowest_id = MessageId::new(*self.lowest_id + self.front_buffer.len() as u64);
         std::mem::swap(&mut self.front_buffer, &mut self.back_buffer);
@@ -96,6 +96,7 @@ impl<T: Message> MessageQueue<T> {
         }
     }
 
+    #[allow(dead_code)] // TODO
     pub fn len(&self) -> usize {
         self.front_buffer.len() + self.back_buffer.len()
     }
@@ -144,7 +145,7 @@ impl<T: Message> MessageReader<'_, T> {
 
         let message = self.queue.get_internal(index);
         if let Some(msg) = message {
-            let id = MessageId::new(self.from_id.clone());
+            let id = MessageId::new(**self.from_id);
             self.from_id.0 += 1;
             Some((id, msg))
         } else {

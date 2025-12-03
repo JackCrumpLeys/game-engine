@@ -1,9 +1,10 @@
+#![allow(dead_code)]
 use std::collections::HashMap;
 use std::ops::DerefMut;
 
 use game_engine_ecs::prelude::*;
 use game_engine_ecs::query::Mut;
-use game_engine_ecs::system::{System, UnsafeWorldCell};
+use game_engine_ecs::system::{Local, System, UnsafeWorldCell};
 
 use game_engine_ecs::world::World;
 
@@ -126,11 +127,14 @@ struct MoveLinkEvent {
 fn sys_movement_logic(
     mut query: Query<(&mut Position, &LinkedTo)>,
     mut events: MessageWriter<MoveLinkEvent>,
+    mut local: Local<u32>,
 ) {
+    *local += 1;
+
     query.for_each(|(mut pos, link)| {
         // 1. Move Self
-        pos.x += 1.0;
-        pos.y += 1.0;
+        pos.x += *local as f32;
+        pos.y += *local as f32;
 
         // 2. Queue movement for the linked entity
         // Note: We don't need to check for self-linking here for safety.
@@ -138,8 +142,8 @@ fn sys_movement_logic(
         // to move again in the next system. No UB.
         events.write(MoveLinkEvent {
             target: link.0,
-            dx: 1.0,
-            dy: 1.0,
+            dx: *local as f32,
+            dy: *local as f32,
         });
     });
 }

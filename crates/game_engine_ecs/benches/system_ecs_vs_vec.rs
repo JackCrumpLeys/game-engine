@@ -59,18 +59,8 @@ fn sys_movement(mut query: game_engine_ecs::system::Query<(&mut Position, &Veloc
 // System 2: Boundaries (Clamp Position)
 fn sys_boundaries(mut query: game_engine_ecs::system::Query<&mut Position>) {
     query.for_each(|mut pos| {
-        if pos.x > 1000.0 {
-            pos.x = 1000.0;
-        }
-        if pos.x < -1000.0 {
-            pos.x = -1000.0;
-        }
-        if pos.y > 1000.0 {
-            pos.y = 1000.0;
-        }
-        if pos.y < -1000.0 {
-            pos.y = -1000.0;
-        }
+        pos.x = pos.x.clamp(-1000.0, 1000.0);
+        pos.y = pos.y.clamp(-1000.0, 1000.0);
     });
 }
 
@@ -169,7 +159,7 @@ impl VecWorld {
 }
 
 // Vec System 1
-fn vec_sys_movement(pos: &mut Vec<Position>, vel: &Vec<Velocity>) {
+fn vec_sys_movement(pos: &mut [Position], vel: &[Velocity]) {
     for (p, v) in pos.iter_mut().zip(vel.iter()) {
         p.x += v.x;
         p.y += v.y;
@@ -177,36 +167,22 @@ fn vec_sys_movement(pos: &mut Vec<Position>, vel: &Vec<Velocity>) {
 }
 
 // Vec System 2
-fn vec_sys_boundaries(pos: &mut Vec<Position>) {
+fn vec_sys_boundaries(pos: &mut [Position]) {
     for p in pos.iter_mut() {
-        if p.x > 1000.0 {
-            p.x = 1000.0;
-        }
-        if p.x < -1000.0 {
-            p.x = -1000.0;
-        }
-        if p.y > 1000.0 {
-            p.y = 1000.0;
-        }
-        if p.y < -1000.0 {
-            p.y = -1000.0;
-        }
+        p.x = p.x.clamp(-1000.0, 1000.0);
+        p.y = p.y.clamp(-1000.0, 1000.0);
     }
 }
 
 // Vec System 3
-fn vec_sys_rotate(rot: &mut Vec<Rotation>) {
+fn vec_sys_rotate(rot: &mut [Rotation]) {
     for r in rot.iter_mut() {
         r.radians += 0.01;
     }
 }
 
 // Vec System 4
-fn vec_sys_update_transform(
-    pos: &Vec<Position>,
-    rot: &Vec<Rotation>,
-    mat: &mut Vec<TransformMatrix>,
-) {
+fn vec_sys_update_transform(pos: &[Position], rot: &[Rotation], mat: &mut [TransformMatrix]) {
     for ((p, r), m) in std::iter::zip(pos, rot).zip(mat) {
         let c = r.radians.cos();
         let s = r.radians.sin();
@@ -221,7 +197,7 @@ fn vec_sys_update_transform(
 }
 
 // Vec System 5
-fn vec_sys_life_logic(hp: &mut Vec<Health>, regen: &Vec<Option<Regen>>, poisoned: &Vec<bool>) {
+fn vec_sys_life_logic(hp: &mut [Health], regen: &[Option<Regen>], poisoned: &[bool]) {
     // This demonstrates the weakness of pure Vecs: Iterating sparse data or flags requires checking every index
     // unless you maintain separate lists (which effectively reinvents archetypes).
     for i in 0..hp.len() {
@@ -256,7 +232,7 @@ fn bench_allocation(c: &mut Criterion) {
                 let hp = Health { val: 100.0 };
 
                 // Fragment data to stress archetype creation
-                if i % 2 == 0 {
+                if i.is_multiple_of(2) {
                     world.spawn((
                         pos,
                         vel,
@@ -289,7 +265,7 @@ fn bench_allocation(c: &mut Criterion) {
                 let rot = Rotation { radians: 0.0 };
                 let hp = Health { val: 100.0 };
 
-                if i % 2 == 0 {
+                if i.is_multiple_of(2) {
                     world.push_entity(pos, vel, rot, hp, Some(Regen { rate: 1.0 }), false);
                 } else {
                     world.push_entity(pos, vel, rot, hp, None, true);
@@ -348,7 +324,7 @@ fn bench_systems_execution(c: &mut Criterion) {
         let vel = Velocity { x: 1.0, y: 1.0 };
         let rot = Rotation { radians: 0.0 };
         let hp = Health { val: 100.0 };
-        if i % 2 == 0 {
+        if i.is_multiple_of(2) {
             ecs_world.spawn((
                 pos,
                 vel,
@@ -383,7 +359,7 @@ fn bench_systems_execution(c: &mut Criterion) {
         let vel = Velocity { x: 1.0, y: 1.0 };
         let rot = Rotation { radians: 0.0 };
         let hp = Health { val: 100.0 };
-        if i % 2 == 0 {
+        if i.is_multiple_of(2) {
             vec_world.push_entity(pos, vel, rot, hp, Some(Regen { rate: 1.0 }), false);
         } else {
             vec_world.push_entity(pos, vel, rot, hp, None, true);
@@ -393,8 +369,7 @@ fn bench_systems_execution(c: &mut Criterion) {
     // --- RUN BENCH ---
 
     group.bench_function("ECS Systems", |b| {
-        // We reuse the unsafe cell wrapper pattern used in the ECS implementation
-        b.iter(|| unsafe {
+        b.iter(|| {
             app.run();
         });
     });

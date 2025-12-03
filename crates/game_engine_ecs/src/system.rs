@@ -2,12 +2,12 @@ pub mod function;
 
 use crate::archetype::ArchetypeId;
 use crate::borrow::ColumnBorrowChecker;
-use crate::component::ComponentId;
 use crate::prelude::{Res, ResMut, Resource};
 use crate::query::{Filter, GetGuard, QueryInner, QueryIter, QueryToken, View};
 use crate::world::World;
-use std::any::type_name;
+use std::any::TypeId;
 use std::collections::HashSet;
+use std::ops::{Deref, DerefMut};
 
 /// Unsafe access to the world.
 /// This exists to allow splitting the borrow of World.
@@ -143,8 +143,16 @@ pub struct Local<'w, T: Send + Sync + Default> {
     inner: &'w mut T,
 }
 
-impl<'w, T: Send + Sync + Default> Local<'w, T> {
-    fn get(&mut self) -> &mut T {
+impl<'w, T: Send + Sync + Default> Deref for Local<'w, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner
+    }
+}
+
+impl<'w, T: Send + Sync + Default> DerefMut for Local<'w, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
         self.inner
     }
 }
@@ -171,7 +179,7 @@ impl<T: Send + Sync + 'static> SystemParam for Res<'_, T> {
     type Item<'w> = Res<'w, T>;
 
     fn init_state(_world: &mut World, access: &mut SystemAccess) -> Self::State {
-        access.resources_read.insert(std::any::TypeId::of::<T>());
+        access.resources_read.insert(TypeId::of::<T>());
     }
 
     unsafe fn get_param<'w>(
@@ -192,7 +200,7 @@ impl<T: Send + Sync + 'static> SystemParam for ResMut<'_, T> {
     type Item<'w> = ResMut<'w, T>;
 
     fn init_state(_world: &mut World, access: &mut SystemAccess) -> Self::State {
-        access.resources_write.insert(std::any::TypeId::of::<T>());
+        access.resources_write.insert(TypeId::of::<T>());
     }
 
     unsafe fn get_param<'w>(
@@ -260,7 +268,7 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
     pub fn iter(&mut self) -> QueryIter<'_, Q::View<'_>, F> {
         // Saftety at this point the column borrow checks have been done by the scheduler.
         let world = unsafe { self.world.world_mut() };
-        debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0 as usize);
+        debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
         // Explicitly pass the View and Filter types to the generic iter method
         self.query.iter::<Q::View<'_>, F>(world)
     }
@@ -272,7 +280,7 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
     {
         // Saftety at this point the column borrow checks have been done by the scheduler.
         let world = unsafe { self.world.world_mut() };
-        debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0 as usize);
+        debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
         self.query.for_each::<Q::View<'a>, F, Func>(world, func)
     }
 

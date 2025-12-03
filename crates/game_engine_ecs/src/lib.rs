@@ -11,6 +11,7 @@ pub mod query;
 pub mod resource;
 mod storage;
 pub mod system;
+mod thread_entity_allocator;
 pub mod world;
 
 pub mod prelude {

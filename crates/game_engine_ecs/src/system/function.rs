@@ -11,7 +11,8 @@ where
     func: Func,
     state: Option<Params::State>,
     access: SystemAccess,
-    name: String,
+    #[allow(dead_code)]
+    name: String, // TODO this will be used for debugging/profiling later
     _marker: PhantomData<Marker>,
 }
 

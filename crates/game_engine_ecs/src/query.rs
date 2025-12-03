@@ -4,10 +4,8 @@ use crate::component::{Component, ComponentId, ComponentMask, ComponentRegistry}
 use crate::entity::Entity;
 use crate::world::World;
 
-use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::sync::Arc;
 
 // ============================================================================
 // Internal Machinery (Fetch & View)
@@ -387,15 +385,15 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         // 2. Calculate Filter borrows (e.g., Changed<Velocity> requires reading ticks)
         let mut filter_borrow_checker = ColumnBorrowChecker::new();
         let mut borrow_checker = ColumnBorrowChecker::new();
-        QD::borrow_columns(&registry, &mut borrow_checker);
-        FD::borrow_columns(&registry, &mut filter_borrow_checker);
+        QD::borrow_columns(registry, &mut borrow_checker);
+        FD::borrow_columns(registry, &mut filter_borrow_checker);
 
         // 3. Merge them. Allows both View and Filter to borrow their columns (even if
         //    overlapping). Thsi is safe because View and Filter never run concurrently.
         borrow_checker.overlay(&filter_borrow_checker);
 
         Self {
-            borrow_checker: borrow_checker,
+            borrow_checker,
             cached_archetypes: Vec::new(),
             last_updated_arch_idx: ArchetypeId(0),
             view_required: ComponentMask::from_ids(&view_required),
@@ -408,7 +406,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
 
     /// Scans new archetypes in the World since the last update and adds matches to the cache.
     fn update_archetype_cache(&mut self, world: &World) {
-        if self.last_updated_arch_idx.0 as usize == world.archetypes.len() {
+        if self.last_updated_arch_idx.0 == world.archetypes.len() {
             return;
         }
         for arch in world.archetypes.since(self.last_updated_arch_idx) {
@@ -702,28 +700,28 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             // 1. Try to pull from the current archetype's fetch
-            if let Some(fetch) = &mut self.current_fetch {
-                if self.current_row < self.current_len {
-                    self.current_row += 1;
+            if let Some(fetch) = &mut self.current_fetch
+                && self.current_row < self.current_len
+            {
+                self.current_row += 1;
 
-                    // Apply Filter Logic
-                    if let Some(skip_filter) = &mut self.current_skip_filter {
-                        if skip_filter.should_skip() {
-                            // Skip this entity.
-                            // SAFETY: `fetch.skip(1)` simply advances the pointers.
-                            // We checked `current_row < current_len`, so this is safe.
-                            unsafe { fetch.skip(1) };
-                            continue;
-                        }
-                    }
-
-                    // Return Item
-                    // SAFETY:
-                    // 1. `fetch` holds valid pointers to columns for this archetype.
-                    // 2. We checked bounds `current_row < current_len`.
-                    // 3. The `AtomicBorrow` locks prevent data races.
-                    return Some(unsafe { fetch.next() });
+                // Apply Filter Logic
+                if let Some(skip_filter) = &mut self.current_skip_filter
+                    && skip_filter.should_skip()
+                {
+                    // Skip this entity.
+                    // SAFETY: `fetch.skip(1)` simply advances the pointers.
+                    // We checked `current_row < current_len`, so this is safe.
+                    unsafe { fetch.skip(1) };
+                    continue;
                 }
+
+                // Return Item
+                // SAFETY:
+                // 1. `fetch` holds valid pointers to columns for this archetype.
+                // 2. We checked bounds `current_row < current_len`.
+                // 3. The `AtomicBorrow` locks prevent data races.
+                return Some(unsafe { fetch.next() });
             }
 
             // 2. Current archetype exhausted or not set. Move to next.
@@ -776,7 +774,7 @@ pub trait FilterData: 'static + Send + Sync {
         required: &mut Vec<ComponentId>,
         excluded: &mut Vec<ComponentId>,
     );
-    fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {}
+    fn borrow_columns(_registry: &ComponentRegistry, _checker: &mut ColumnBorrowChecker) {}
 }
 
 // Dynamic behavior for filters (Skip logic)
@@ -785,9 +783,9 @@ pub trait Filter {
     type SkipFilter<'a>: SkipFilter = ();
 
     fn create_skip_filter<'a>(
-        archetype: &'a mut Archetype,
-        registry: &ComponentRegistry,
-        tick: u32,
+        _archetype: &'a mut Archetype,
+        _registry: &ComponentRegistry,
+        _tick: u32,
     ) -> Option<Self::SkipFilter<'a>> {
         None
     }
@@ -847,7 +845,7 @@ pub struct With<T>(PhantomData<T>);
 impl<T: Component> Filter for With<T> {
     type Persistent = WithData<T>;
     type SkipFilter<'a> = ();
-    fn create_skip_filter<'a>(_: &'a mut Archetype, _: &ComponentRegistry, _: u32) -> Option<()> {
+    fn create_skip_filter(_: &mut Archetype, _: &ComponentRegistry, _: u32) -> Option<()> {
         None
     }
 }
@@ -869,7 +867,7 @@ pub struct Without<T>(PhantomData<T>);
 impl<T: Component> Filter for Without<T> {
     type Persistent = WithoutData<T>;
     type SkipFilter<'a> = ();
-    fn create_skip_filter<'a>(_: &'a mut Archetype, _: &ComponentRegistry, _: u32) -> Option<()> {
+    fn create_skip_filter(_: &mut Archetype, _: &ComponentRegistry, _: u32) -> Option<()> {
         None
     }
 }
@@ -1105,7 +1103,7 @@ impl<Q: QueryToken, F: Filter> QueryState<Q, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prelude::*; // Assuming Component, Entity, World are reachable
+    // Assuming Component, Entity, World are reachable
     use crate::world::World;
 
     // ========================================================================

@@ -55,7 +55,7 @@ impl ArchetypeStore {
 
     /// Gets an iterator over archetypes added since the given ArchetypeId.
     pub fn since(&self, last_seen: ArchetypeId) -> impl Iterator<Item = &Archetype> {
-        self.0.iter().skip(last_seen.0 as usize)
+        self.0.iter().skip(last_seen.0)
     }
 }
 
@@ -71,17 +71,13 @@ impl Index<ArchetypeId> for ArchetypeStore {
     type Output = Archetype;
 
     fn index(&self, index: ArchetypeId) -> &Self::Output {
-        self.0
-            .get(index.0 as usize)
-            .expect("ArchetypeId out of bounds")
+        self.0.get(index.0).expect("ArchetypeId out of bounds")
     }
 }
 
 impl IndexMut<ArchetypeId> for ArchetypeStore {
     fn index_mut(&mut self, index: ArchetypeId) -> &mut Self::Output {
-        self.0
-            .get_mut(index.0 as usize)
-            .expect("ArchetypeId out of bounds")
+        self.0.get_mut(index.0).expect("ArchetypeId out of bounds")
     }
 }
 
@@ -196,7 +192,7 @@ impl World {
         true
     }
 
-    fn get_or_create_archetype(&mut self, mut comp_ids: Vec<ComponentId>) -> ArchetypeId {
+    fn get_or_create_archetype(&mut self, comp_ids: Vec<ComponentId>) -> ArchetypeId {
         let component_mask = ComponentMask::from_ids(&comp_ids);
         if let Some(&id) = self.archetype_index.get(&component_mask) {
             return id;
