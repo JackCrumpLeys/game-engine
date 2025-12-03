@@ -1,6 +1,6 @@
 use crate::archetype::{Archetype, ArchetypeId};
 use crate::bundle::Bundle;
-use crate::component::{ComponentId, ComponentRegistry};
+use crate::component::{ComponentId, ComponentMask, ComponentRegistry};
 use crate::entity::{Entities, Entity};
 use crate::query::{Filter, QueryInner, QueryToken};
 use crate::resource::Resources;
@@ -29,8 +29,7 @@ pub struct World {
     pub(crate) archetypes: ArchetypeStore,
     // Maps Entity Index -> Location
     entity_index: Vec<Option<EntityLocation>>,
-    // Maps Sorted Component IDs -> Archetype ID
-    archetype_index: HashMap<Vec<ComponentId>, ArchetypeId>,
+    archetype_index: HashMap<ComponentMask, ArchetypeId>,
     resources: Resources,
     current_tick: u32,
 }
@@ -198,16 +197,15 @@ impl World {
     }
 
     fn get_or_create_archetype(&mut self, mut comp_ids: Vec<ComponentId>) -> ArchetypeId {
-        comp_ids.sort_unstable(); // Archetypes keys are always sorted
-
-        if let Some(&id) = self.archetype_index.get(&comp_ids) {
+        let component_mask = ComponentMask::from_ids(&comp_ids);
+        if let Some(&id) = self.archetype_index.get(&component_mask) {
             return id;
         }
 
         let id = ArchetypeId(self.archetypes.len());
         let archetype = Archetype::new(id, comp_ids.clone(), &self.registry);
         self.archetypes.push(archetype);
-        self.archetype_index.insert(comp_ids, id);
+        self.archetype_index.insert(component_mask, id);
         id
     }
 

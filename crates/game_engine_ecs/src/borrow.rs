@@ -3,7 +3,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashMap;
 
-use crate::{archetype::Archetype, prelude::ComponentId};
+use crate::{archetype::Archetype, component::ComponentMask, prelude::ComponentId};
 /// A bit mask used to signal the `AtomicBorrow` has an active mutable borrow.
 const UNIQUE_BIT: usize = !(usize::MAX >> 1);
 
@@ -71,13 +71,8 @@ impl AtomicBorrow {
 
 #[derive(Clone)]
 pub struct ColumnBorrowChecker {
-    borrows: HashMap<ComponentId, AccessType>,
-}
-
-#[derive(Clone)]
-enum AccessType {
-    Immutable,
-    Mutable,
+    borrows: ComponentMask,
+    mut_borrows: ComponentMask,
 }
 
 impl Default for ColumnBorrowChecker {
@@ -89,38 +84,30 @@ impl Default for ColumnBorrowChecker {
 impl ColumnBorrowChecker {
     pub fn new() -> Self {
         Self {
-            borrows: HashMap::new(),
+            borrows: ComponentMask::default(),
+            mut_borrows: ComponentMask::default(),
         }
     }
 
     fn try_borrow(&mut self, comp_id: ComponentId, mutable: bool) -> bool {
-        match self.borrows.get(&comp_id) {
-            Some(AccessType::Mutable) => false, // Already mutably borrowed
-            Some(AccessType::Immutable) if mutable => false, // Cannot mutably borrow if immutably borrowed
-            _ => {
-                // No existing borrow or compatible borrow
-                self.borrows.insert(
-                    comp_id,
-                    if mutable {
-                        AccessType::Mutable
-                    } else {
-                        AccessType::Immutable
-                    },
-                );
+        match (self.borrows.has(comp_id.0), self.mut_borrows.has(comp_id.0)) {
+            (false, false) if mutable => {
+                self.borrows.unsafe_set(comp_id.0);
+                self.mut_borrows.unsafe_set(comp_id.0);
                 true
             }
+            (false, false) => {
+                self.borrows.unsafe_set(comp_id.0);
+                true
+            }
+            (true, false) => true, // we can have multiple immutable borrows
+            _ => false,            // if mutably borrowed, no other borrows allowed
         }
     }
 
     pub fn conflicts(&self, other: &Self) -> bool {
-        for (id, my_access) in &self.borrows {
-            if let Some(other_access) = other.borrows.get(id) {
-                // If either one is Mutable, it's a conflict.
-                match (my_access, other_access) {
-                    (AccessType::Immutable, AccessType::Immutable) => continue,
-                    _ => return true,
-                }
-            }
+        if self.mut_borrows.intersects(&other.borrows) {
+            return true;
         }
         false
     }
@@ -128,31 +115,22 @@ impl ColumnBorrowChecker {
     /// Extend this borrow checker with another borrow checker.
     /// Panics at runtime if there is a conflict.
     pub fn extend(&mut self, other: &ColumnBorrowChecker) {
-        for (comp_id, access) in &other.borrows {
-            match (self.borrows.get(comp_id), access) {
-                (Some(AccessType::Mutable), _) => {
-                    panic!("Runtime borrow conflict detected. Component ID: {comp_id:?}")
-                }
-                (_, AccessType::Mutable) => {
-                    // Upgrade to mutable
-                    self.borrows.insert(*comp_id, AccessType::Mutable);
-                }
-                (Some(AccessType::Immutable), AccessType::Immutable) => {} // Already immutably borrowed
-                (None, AccessType::Immutable) => {
-                    self.borrows.insert(*comp_id, AccessType::Immutable);
-                }
-            }
+        if self.conflicts(other) {
+            panic!("conflicting borrows detected");
         }
+
+        self.borrows.union(&other.borrows);
+        self.mut_borrows.union(&other.mut_borrows);
     }
 
     /// Create a new ColumnBorrowChecker by retaining only components from a specific archetype.
     pub fn for_archetype(&self, arch: &Archetype) -> ColumnBorrowChecker {
         let mut new_checker = ColumnBorrowChecker::new();
-        for comp_id in arch.component_ids.iter() {
-            if let Some(access) = self.borrows.get(comp_id) {
-                new_checker.borrows.insert(*comp_id, access.clone());
-            }
-        }
+        new_checker.borrows = self.borrows;
+        new_checker.mut_borrows = self.mut_borrows;
+
+        new_checker.borrows.intersection(&arch.component_mask);
+        new_checker.mut_borrows.intersection(&arch.component_mask);
         new_checker
     }
 
@@ -162,82 +140,71 @@ impl ColumnBorrowChecker {
     /// (imm) None -> imm
     /// (mut) imm -> Mut
     pub fn overlay(&mut self, other: &ColumnBorrowChecker) {
-        for (comp_id, access) in &other.borrows {
-            match (self.borrows.get(comp_id), access) {
-                (Some(AccessType::Mutable), _) => {} // Already mutably borrowed
-                (_, AccessType::Mutable) => {
-                    // Upgrade to mutable
-                    self.borrows.insert(*comp_id, AccessType::Mutable);
-                }
-                (Some(AccessType::Immutable), AccessType::Immutable) => {} // Already immutably borrowed
-                (None, AccessType::Immutable) => {
-                    self.borrows.insert(*comp_id, AccessType::Immutable);
-                }
-            }
-        }
+        self.borrows.union(&other.borrows);
+        self.mut_borrows.union(&other.mut_borrows);
     }
 
     pub fn apply_borrow(&self, arch: &Archetype) -> bool {
-        for comp_id in arch.component_ids.iter() {
-            if let Some(access) = self.borrows.get(comp_id) {
-                match access {
-                    AccessType::Immutable => {
-                        if !arch.borrow_column(*comp_id) {
-                            return false;
-                        }
-                    }
-                    AccessType::Mutable => {
-                        if !arch.borrow_column_mut(*comp_id) {
-                            return false;
-                        }
+        for id in &arch.component_ids {
+            match (self.borrows.has(id.0), self.mut_borrows.has(id.0)) {
+                (true, true) => {
+                    // try mut borrow
+                    if !arch.borrow_column_mut(id) {
+                        return false;
                     }
                 }
+                (true, false) => {
+                    // try imm borrow
+                    if !arch.borrow_column(id) {
+                        return false;
+                    }
+                }
+                _ => {}
             }
         }
         true
     }
 
     pub fn release_borrow(&mut self, arch: &Archetype) {
-        for comp_id in arch.component_ids.iter() {
-            if let Some(access) = self.borrows.get(comp_id) {
-                match access {
-                    AccessType::Immutable => {
-                        arch.release_column(*comp_id);
-                    }
-                    AccessType::Mutable => {
-                        arch.release_column_mut(*comp_id);
-                    }
-                }
+        for id in &arch.component_ids {
+            if self.mut_borrows.has(id.0) {
+                arch.release_column_mut(*id);
+            } else if self.borrows.has(id.0) {
+                arch.release_column(*id);
             }
         }
     }
 
     pub fn clear(&mut self) {
-        self.borrows.clear();
+        self.borrows = ComponentMask::default();
+        self.mut_borrows = ComponentMask::default();
     }
 
+    /// Extract raw borrows for these columns in the archetype.
+    /// Also indicates whether each borrow is mutable.
     pub fn get_raw_borrows<'a>(&mut self, arch: &'a Archetype) -> Vec<(&'a AtomicBorrow, bool)> {
-        let mut ret = Vec::new();
-        for comp_id in arch.component_ids.iter() {
-            if let Some(access) = self.borrows.get(comp_id) {
-                match access {
-                    AccessType::Immutable => {
-                        ret.push((arch.column(*comp_id).unwrap().borrow_state(), false));
-                    }
-                    AccessType::Mutable => {
-                        ret.push((arch.column(*comp_id).unwrap().borrow_state(), true));
-                    }
+        let mut result = Vec::new();
+
+        for id in &arch.component_ids {
+            if self.mut_borrows.has(id.0) {
+                if let Some(col) = arch.column(id) {
+                    result.push((col.borrow_state(), true));
+                }
+            } else if self.borrows.has(id.0) {
+                if let Some(col) = arch.column(id) {
+                    result.push((col.borrow_state(), false));
                 }
             }
         }
-        ret
+
+        result
     }
 
     /// Attempt to borrow a component column.
     /// panics on conflict.
     pub fn borrow(&mut self, comp_id: ComponentId) {
         if !self.try_borrow(comp_id, false) {
-            panic!("Runtime borrow conflict detected") // TODO: better error message
+            panic!("conflicting borrow detected for component {:?}", comp_id);
         }
     }
 
@@ -245,7 +212,10 @@ impl ColumnBorrowChecker {
     /// panics on conflict.
     pub fn borrow_mut(&mut self, comp_id: ComponentId) {
         if !self.try_borrow(comp_id, true) {
-            panic!("Runtime borrow conflict detected") // TODO: better error message
+            panic!(
+                "conflicting mutable borrow detected for component {:?}",
+                comp_id
+            );
         }
     }
 }

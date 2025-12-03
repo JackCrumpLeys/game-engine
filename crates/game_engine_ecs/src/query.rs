@@ -202,7 +202,7 @@ impl<'a, T: Component> View<'a> for Mut<'a, T> {
         tick: u32,
     ) -> Option<Self::Fetch> {
         let id = registry.get_id::<T>()?;
-        let column = archetype.column_mut(id)?;
+        let column = archetype.column_mut(&id)?;
 
         // SAFETY: We have exclusive access to the column due to the mutable borrow.
         // Caller must use borrow_columns to first borrow the column mutably.
@@ -234,7 +234,7 @@ impl<'a, T: Component> View<'a> for &'a T {
         _tick: u32,
     ) -> Option<Self::Fetch> {
         let id = registry.get_id::<T>()?;
-        let column = archetype.column_mut(id)?;
+        let column = archetype.column_mut(&id)?;
 
         let ptr = column.get_ptr(0) as *mut T;
         // SAFETY: We have a shared borrow to the column.
@@ -383,8 +383,19 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         let mut filter_excluded = Vec::new();
         FD::populate_requirements(registry, &mut filter_required, &mut filter_excluded);
 
+        // 1. Calculate View borrows (e.g., &mut Position)
+        // 2. Calculate Filter borrows (e.g., Changed<Velocity> requires reading ticks)
+        let mut filter_borrow_checker = ColumnBorrowChecker::new();
+        let mut borrow_checker = ColumnBorrowChecker::new();
+        QD::borrow_columns(&registry, &mut borrow_checker);
+        FD::borrow_columns(&registry, &mut filter_borrow_checker);
+
+        // 3. Merge them. Allows both View and Filter to borrow their columns (even if
+        //    overlapping). Thsi is safe because View and Filter never run concurrently.
+        borrow_checker.overlay(&filter_borrow_checker);
+
         Self {
-            borrow_checker: ColumnBorrowChecker::new(),
+            borrow_checker: borrow_checker,
             cached_archetypes: Vec::new(),
             last_updated_arch_idx: ArchetypeId(0),
             view_required: ComponentMask::from_ids(&view_required),
@@ -429,17 +440,6 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     /// Also applies these borrows to the matching archetypes in the world to ensure
     /// runtime safety against other simultaneous queries (if we were multi-threaded without a scheduler).
     pub(crate) fn borrow_check(&mut self, world: &mut World) -> bool {
-        // 1. Calculate View borrows (e.g., &mut Position)
-        // 2. Calculate Filter borrows (e.g., Changed<Velocity> requires reading ticks)
-        let mut filter_borrow_checker = ColumnBorrowChecker::new();
-        QD::borrow_columns(&world.registry, &mut self.borrow_checker);
-        FD::borrow_columns(&world.registry, &mut filter_borrow_checker);
-
-        // 3. Merge them. Allows both View and Filter to borrow their columns (even if
-        //    overlapping). Thsi is safe because View and Filter never run concurrently.
-        self.borrow_checker.overlay(&filter_borrow_checker);
-
-        // 4. Apply locks to actual archetypes.
         for &arch_id in &self.cached_archetypes {
             let arch = &mut world.archetypes[arch_id];
             if !self.borrow_checker.apply_borrow(arch) {
@@ -456,15 +456,6 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         world: &World,
         start_from: ArchetypeId,
     ) -> Vec<(ArchetypeId, ColumnBorrowChecker)> {
-        let mut borrow_checker = ColumnBorrowChecker::new();
-        let mut filter_borrow_checker = ColumnBorrowChecker::new();
-        QD::borrow_columns(&world.registry, &mut borrow_checker);
-        FD::borrow_columns(&world.registry, &mut filter_borrow_checker);
-
-        // Merge them. Allows both View and Filter to borrow their columns (even if
-        // overlapping). Thsi is safe because View and Filter never run concurrently.
-        self.borrow_checker.overlay(&filter_borrow_checker);
-
         self.update_archetype_cache(world);
 
         self.cached_archetypes
@@ -473,7 +464,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             .copied()
             .map(|arch_id| {
                 let arch = &world.archetypes[arch_id];
-                (arch_id, borrow_checker.for_archetype(arch))
+                (arch_id, self.borrow_checker.for_archetype(arch))
             })
             .collect()
     }
@@ -624,7 +615,6 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
             self.borrow_checker.release_borrow(arch);
         }
-        self.borrow_checker.clear();
     }
 
     pub(crate) fn last_updated_arch_idx(&self) -> ArchetypeId {
@@ -974,7 +964,7 @@ impl<T: Component> Filter for Changed<T> {
         tick: u32,
     ) -> Option<Self::SkipFilter<'a>> {
         let id = registry.get_id::<T>()?;
-        let column = archetype.column_mut(id)?;
+        let column = archetype.column_mut(&id)?;
         let ptr = column.get_ticks_ptr();
         Some(ChangedSkipFilter {
             change_tick: tick,
@@ -1345,7 +1335,7 @@ mod tests {
     // ========================================================================
 
     #[test]
-    #[should_panic(expected = "Runtime borrow conflict detected")]
+    #[should_panic(expected = "conflicting mutable borrow detected for component ComponentId(0)")]
     fn test_panic_mut_mut_aliasing() {
         let mut world = World::new();
         world.spawn((Pos { x: 0., y: 0. },));
@@ -1356,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Runtime borrow conflict detected")]
+    #[should_panic(expected = "conflicting borrow detected for component ComponentId(0)")]
     fn test_panic_mut_ref_aliasing() {
         let mut world = World::new();
         world.spawn((Pos { x: 0., y: 0. },));

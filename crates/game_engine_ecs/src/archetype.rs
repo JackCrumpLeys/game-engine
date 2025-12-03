@@ -105,28 +105,28 @@ impl Archetype {
     }
 
     /// Helper to access a specific column safely and mutably
-    pub fn column_mut(&mut self, id: ComponentId) -> Option<&mut Column> {
-        self.columns.get_mut(&id)
+    pub fn column_mut(&mut self, id: &ComponentId) -> Option<&mut Column> {
+        self.columns.get_mut(id)
     }
 
     /// Helper to access a specific column safely
-    pub fn column(&self, id: ComponentId) -> Option<&Column> {
-        self.columns.get(&id)
+    pub fn column(&self, id: &ComponentId) -> Option<&Column> {
+        self.columns.get(id)
     }
 
     /// Helper to Borrow a specific column
     /// Returns false if the column does not exist or is already borrowed
-    pub fn borrow_column(&self, id: ComponentId) -> bool {
+    pub fn borrow_column(&self, id: &ComponentId) -> bool {
         self.columns
-            .get(&id)
+            .get(id)
             .is_some_and(|c| c.borrow_state().borrow())
     }
 
     /// Helper to borrow a specific column mutably
     /// returns false if the column does not exist or is already borrowed
-    pub fn borrow_column_mut(&self, id: ComponentId) -> bool {
+    pub fn borrow_column_mut(&self, id: &ComponentId) -> bool {
         self.columns
-            .get(&id)
+            .get(id)
             .is_some_and(|c| c.borrow_state().borrow_mut())
     }
 
@@ -167,8 +167,8 @@ mod tests {
 
         // Manually push data to columns (simulating what World will do)
         unsafe {
-            arch.column_mut(pos_id).unwrap().push(100u32, 0);
-            arch.column_mut(vel_id).unwrap().push(1.0f32, 0);
+            arch.column_mut(&pos_id).unwrap().push(100u32, 0);
+            arch.column_mut(&vel_id).unwrap().push(1.0f32, 0);
         }
 
         assert_eq!(arch.len(), 1);

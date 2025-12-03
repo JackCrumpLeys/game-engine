@@ -17,135 +17,149 @@ pub struct ComponentMeta {
     pub layout: Layout,
 }
 
-#[macro_export]
-macro_rules! define_component_mask {
-    ($name:ident, $max_components:expr) => {
-        /// A bitmask that fits the configured max components.
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
-        pub struct $name {
-            bits: [u64; MAX_COMPONENTS.div_ceil(64)],
-        }
-
-        impl $name {
-            pub const WORD_COUNT: usize = MAX_COMPONENTS.div_ceil(64);
-            pub const CAPACITY: usize = $max_components;
-
-            #[inline(always)]
-            pub fn new() -> Self {
-                Self {
-                    bits: [0; Self::WORD_COUNT],
-                }
-            }
-
-            /// Helper to set bit using ComponentId directly
-            #[inline]
-            pub fn set_id(&mut self, id: ComponentId) {
-                self.set(id.0);
-            }
-
-            /// Helper to set multiple bits using Vec<ComponentId>
-            #[inline]
-            pub fn set_ids(&mut self, ids: &[ComponentId]) {
-                for id in ids {
-                    self.set(id.0);
-                }
-            }
-
-            /// Helper to check bit using ComponentId directly
-            #[inline]
-            pub fn has_id(&self, id: ComponentId) -> bool {
-                self.has(id.0)
-            }
-
-            /// Helper to create a mask from a slice of ComponentIds
-            #[inline]
-            pub fn from_ids(ids: &[ComponentId]) -> Self {
-                let mut mask = Self::new();
-                for id in ids {
-                    mask.set(id.0);
-                }
-                mask
-            }
-
-            #[inline]
-            pub fn set(&mut self, index: usize) {
-                if index >= Self::CAPACITY {
-                    panic!(
-                        "Index {} out of bounds for ComponentMask with capacity {}",
-                        index,
-                        Self::CAPACITY
-                    );
-                }
-                let word = index / 64;
-                let bit = index % 64;
-                self.bits[word] |= 1 << bit;
-            }
-
-            #[inline]
-            pub fn has(&self, index: usize) -> bool {
-                if index >= Self::CAPACITY {
-                    return false;
-                }
-                let word = index / 64;
-                let bit = index % 64;
-                (self.bits[word] & (1 << bit)) != 0
-            }
-
-            #[inline]
-            pub fn contains_all(&self, other: &Self) -> bool {
-                for i in 0..Self::WORD_COUNT {
-                    if (self.bits[i] & other.bits[i]) != other.bits[i] {
-                        return false;
-                    }
-                }
-                true
-            }
-
-            #[inline]
-            pub fn intersects(&self, other: &Self) -> bool {
-                for i in 0..Self::WORD_COUNT {
-                    if (self.bits[i] & other.bits[i]) != 0 {
-                        return true;
-                    }
-                }
-                false
-            }
-
-            #[inline]
-            pub fn union(&mut self, other: &Self) {
-                for i in 0..Self::WORD_COUNT {
-                    self.bits[i] |= other.bits[i];
-                }
-            }
-
-            #[inline]
-            pub fn is_empty(&self) -> bool {
-                for i in 0..Self::WORD_COUNT {
-                    if self.bits[i] != 0 {
-                        return false;
-                    }
-                }
-                true
-            }
-        }
-
-        // Custom Debug implementation to print set bits like [0, 3, 5]
-        impl fmt::Debug for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let mut list = f.debug_list();
-                for i in 0..Self::CAPACITY {
-                    if self.has(i) {
-                        list.entry(&i);
-                    }
-                }
-                list.finish()
-            }
-        }
-    };
+/// A bitmask that fits the configured max components.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ComponentMask {
+    bits: [u64; MAX_COMPONENTS.div_ceil(64)],
 }
 
-// Generate the mask using the constant
-define_component_mask!(ComponentMask, MAX_COMPONENTS);
+impl ComponentMask {
+    pub const WORD_COUNT: usize = MAX_COMPONENTS.div_ceil(64);
+    pub const CAPACITY: usize = MAX_COMPONENTS;
+
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self {
+            bits: [0; Self::WORD_COUNT],
+        }
+    }
+
+    /// Helper to set bit using ComponentId directly
+    #[inline]
+    pub fn set_id(&mut self, id: ComponentId) {
+        self.set(id.0);
+    }
+
+    /// Helper to set multiple bits using Vec<ComponentId>
+    #[inline]
+    pub fn set_ids(&mut self, ids: &[ComponentId]) {
+        for id in ids {
+            self.set(id.0);
+        }
+    }
+
+    /// Helper to check bit using ComponentId directly
+    #[inline]
+    pub const fn has_id(&self, id: ComponentId) -> bool {
+        self.has(id.0)
+    }
+
+    /// Helper to create a mask from a slice of ComponentIds
+    #[inline]
+    pub fn from_ids(ids: &[ComponentId]) -> Self {
+        let mut mask = Self::new();
+        for id in ids {
+            mask.set(id.0);
+        }
+        mask
+    }
+
+    /// Reconstructs all the set component IDs in this mask.
+    pub fn to_ids(&self) -> Vec<ComponentId> {
+        let mut ids = Vec::new();
+        for index in 0..Self::CAPACITY {
+            if self.has(index) {
+                ids.push(ComponentId(index));
+            }
+        }
+        ids
+    }
+
+    #[inline]
+    pub fn set(&mut self, index: usize) {
+        if index >= Self::CAPACITY {
+            panic!(
+                "Index {} out of bounds for ComponentMask with capacity {}",
+                index,
+                Self::CAPACITY
+            );
+        }
+        self.unsafe_set(index);
+    }
+
+    pub(crate) const fn unsafe_set(&mut self, index: usize) {
+        let word = index / 64;
+        let bit = index % 64;
+        self.bits[word] |= 1 << bit;
+    }
+
+    #[inline]
+    pub const fn has(&self, index: usize) -> bool {
+        if index >= Self::CAPACITY {
+            return false;
+        }
+        let word = index / 64;
+        let bit = index % 64;
+        (self.bits[word] & (1 << bit)) != 0
+    }
+
+    #[inline]
+    pub fn contains_all(&self, other: &Self) -> bool {
+        for i in 0..Self::WORD_COUNT {
+            if (self.bits[i] & other.bits[i]) != other.bits[i] {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline]
+    pub fn intersects(&self, other: &Self) -> bool {
+        for i in 0..Self::WORD_COUNT {
+            if (self.bits[i] & other.bits[i]) != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[inline]
+    pub fn union(&mut self, other: &Self) {
+        for i in 0..Self::WORD_COUNT {
+            self.bits[i] |= other.bits[i];
+        }
+    }
+
+    #[inline]
+    pub fn intersection(&mut self, other: &Self) {
+        for i in 0..Self::WORD_COUNT {
+            self.bits[i] &= other.bits[i];
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        for i in 0..Self::WORD_COUNT {
+            if self.bits[i] != 0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+// Custom Debug implementation to print set bits like [0, 3, 5]
+impl fmt::Debug for ComponentMask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut list = f.debug_list();
+        for i in 0..Self::CAPACITY {
+            if self.has(i) {
+                list.entry(&i);
+            }
+        }
+        list.finish()
+    }
+}
 
 pub trait Component: 'static + Send + Sync + Sized {}
 impl<T: 'static + Send + Sync + Sized> Component for T {}

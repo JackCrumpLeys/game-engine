@@ -27,7 +27,7 @@ macro_rules! impl_bundle {
                 unsafe {
                     $(
                         let id = registry.get_id::<$name>().expect("Component ID should exist");
-                        let column = archetype.column_mut(id).expect("Column should exist");
+                        let column = archetype.column_mut(&id).expect("Column should exist");
                         column.push($name,tick);
                     )*
                 }

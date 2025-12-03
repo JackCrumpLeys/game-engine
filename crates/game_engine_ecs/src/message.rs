@@ -122,8 +122,8 @@ pub struct MessageReader<'a, T: Message> {
     from_id: &'a mut MessageId<T>,
 }
 
-impl<'a, T: Message> MessageReader<'a, T> {
-    pub fn read_next(&'a mut self) -> Option<&'a T> {
+impl<T: Message> MessageReader<'_, T> {
+    pub fn read_next(&mut self) -> Option<&T> {
         let index = self
             .queue
             .index_of(self.from_id)
@@ -136,7 +136,7 @@ impl<'a, T: Message> MessageReader<'a, T> {
         message
     }
 
-    pub fn read_next_with_id(&'a mut self) -> Option<(MessageId<T>, &'a T)> {
+    pub fn read_next_with_id(&mut self) -> Option<(MessageId<T>, &T)> {
         let index = self
             .queue
             .index_of(self.from_id)
@@ -154,7 +154,7 @@ impl<'a, T: Message> MessageReader<'a, T> {
 
     /// An iterator over all unread messages.
     /// It will only advance the internal index when the iterator is advaced
-    pub fn iter(&'a mut self) -> impl Iterator<Item = &'a T> {
+    pub fn iter(&mut self) -> impl Iterator<Item = &T> {
         let index = self
             .queue
             .index_of(self.from_id)
@@ -170,7 +170,7 @@ impl<'a, T: Message> MessageReader<'a, T> {
         .map(|(_, msg)| msg)
     }
 
-    pub fn iter_with_id(&'a mut self) -> impl Iterator<Item = (MessageId<T>, &'a T)> {
+    pub fn iter_with_id(&mut self) -> impl Iterator<Item = (MessageId<T>, &T)> {
         let index = self
             .queue
             .index_of(self.from_id)
@@ -197,7 +197,7 @@ impl<'a, T: Message> Iterator for ReadIterator<'a, T> {
     type Item = (MessageId<T>, &'a T);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.messages.is_empty() {
+        if self.messages.is_empty() || self.vec_index >= self.messages.len() {
             None
         } else {
             let msg = self.messages[self.vec_index];
