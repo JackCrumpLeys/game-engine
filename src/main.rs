@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .level(log::LevelFilter::Debug)
         // Output to stdout, files, and other Dispatch configurations
         .chain(std::io::stdout())
-        .chain(fern::log_file("output.log")?)
+        .chain(fern::log_file("logs/output.log")?)
         // Apply globally
         .apply()?;
 
