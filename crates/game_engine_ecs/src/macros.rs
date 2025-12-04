@@ -10,8 +10,9 @@ macro_rules! impl_all_tuples {
         $second_name:ident $second_idx:tt
         $(, $rest_name:ident $rest_idx:tt)*
     ) => {
-        // 1. Generate for the first pair (A 0, B 1)
+        // 1. Generate for the first pairs (A 0, B 1) (A 0)
         $callback!($first_name $first_idx, $second_name $second_idx);
+        $callback!($first_name $first_idx);
 
         // 2. Start the recursion with the first pair as the "base"
         impl_all_tuples!(

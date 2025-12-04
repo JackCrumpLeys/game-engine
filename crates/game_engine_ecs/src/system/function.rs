@@ -103,27 +103,6 @@ pub trait SystemParamFunction<Marker>: Send + Sync + 'static {
     fn run<'w>(&mut self, item: <Self::Param as SystemParam>::Item<'w>);
 }
 
-// Implementation for single parameter (fn(P))
-impl<Func, P> SystemParamFunction<fn(P)> for Func
-where
-    P: SystemParam + 'static,
-    Func: for<'a> FnMut(P::Item<'a>)
-        +
-        // DISAMBIGUATION: Func must also be callable with P directly.
-        // Since functions are contravariant, fn(Query<'a>) implements Fn(Query<'static>).
-        // This forces P to be the 'static version of the param.
-        FnMut(P)
-        + Send
-        + Sync
-        + 'static,
-{
-    type Param = P;
-
-    fn run<'w>(&mut self, item: P::Item<'w>) {
-        (self)(item)
-    }
-}
-
 // Macro for tuples
 macro_rules! impl_system_function {
     ($($param:ident $idx:tt),*) => {

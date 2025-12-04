@@ -107,6 +107,7 @@ impl<T: Component> QueryToken for &T {
     type Persistent = ReadComponent<T>;
 }
 
+#[derive(Debug)]
 pub struct ReadComponent<T>(PhantomData<T>);
 
 impl<T: Component> QueryData for ReadComponent<T> {
@@ -124,6 +125,7 @@ impl<T: Component> QueryToken for &mut T {
     type Persistent = WriteComponent<T>;
 }
 
+#[derive(Debug)]
 pub struct WriteComponent<T>(PhantomData<T>);
 
 impl<T: Component> QueryData for WriteComponent<T> {
@@ -347,6 +349,7 @@ impl<'a> Fetch<'a> for EntityFetch<'a> {
 ///    (e.g., mutable access to the same component twice).
 ///
 /// This struct is `Send + Sync` because it only holds metadata, not actual component references.
+#[derive(Debug)]
 pub struct QueryInner<QD: QueryData, FD: FilterData = ()> {
     cached_archetypes: Vec<ArchetypeId>,
     last_updated_arch_idx: ArchetypeId,
@@ -576,8 +579,8 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         world: &'a mut World,
         entity: Entity,
     ) -> Option<GetGuard<'a, V::Item>> {
-        // 1. Find Entity Location (O(1))
         let location = world.entity_location(entity)?;
+
         let arch_id = location.archetype_id();
         let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
 
@@ -1134,6 +1137,7 @@ mod tests {
     // Helper: QueryState Wrapper
     // This allows us to write `query.iter(&mut world)` without explicit types
     // ------------------------------------------------------------------------
+    #[derive(Debug)]
     pub struct QueryState<Q: QueryToken, F: Filter = ()> {
         inner: QueryInner<Q::Persistent, F::Persistent>,
         _marker: std::marker::PhantomData<(Q, F)>,
@@ -1241,7 +1245,7 @@ mod tests {
         );
 
         // Test Despawned
-        world.despawn(e1);
+        assert!(world.despawn(e1));
         assert!(query.get(&mut world, e1).is_none(), "Entity 1 is dead");
     }
 

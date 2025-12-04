@@ -233,7 +233,7 @@ fn bench_allocation(c: &mut Criterion) {
 
                 // Fragment data to stress archetype creation
                 if i.is_multiple_of(2) {
-                    world.spawn((
+                    world.spawn_deferred((
                         pos,
                         vel,
                         rot,
@@ -242,9 +242,10 @@ fn bench_allocation(c: &mut Criterion) {
                         TransformMatrix::default(),
                     ));
                 } else {
-                    world.spawn((pos, vel, rot, hp, Poisoned, TransformMatrix::default()));
+                    world.spawn_deferred((pos, vel, rot, hp, Poisoned, TransformMatrix::default()));
                 }
             }
+            world.flush();
             black_box(world);
         })
     });
@@ -325,7 +326,7 @@ fn bench_systems_execution(c: &mut Criterion) {
         let rot = Rotation { radians: 0.0 };
         let hp = Health { val: 100.0 };
         if i.is_multiple_of(2) {
-            ecs_world.spawn((
+            ecs_world.spawn_deferred((
                 pos,
                 vel,
                 rot,
@@ -334,9 +335,10 @@ fn bench_systems_execution(c: &mut Criterion) {
                 TransformMatrix::default(),
             ));
         } else {
-            ecs_world.spawn((pos, vel, rot, hp, Poisoned, TransformMatrix::default()));
+            ecs_world.spawn_deferred((pos, vel, rot, hp, Poisoned, TransformMatrix::default()));
         }
     }
+    ecs_world.flush();
 
     let mut app = App::new();
 

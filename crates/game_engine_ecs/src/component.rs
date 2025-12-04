@@ -15,10 +15,11 @@ pub struct ComponentId(pub usize);
 pub struct ComponentMeta {
     pub name: &'static str,
     pub layout: Layout,
+    pub drop_fn: unsafe fn(*mut u8),
 }
 
 /// A bitmask that fits the configured max components.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct ComponentMask {
     bits: [u64; MAX_COMPONENTS.div_ceil(64)],
 }
@@ -161,7 +162,24 @@ impl fmt::Debug for ComponentMask {
     }
 }
 
-pub trait Component: 'static + Send + Sync + Sized {}
+pub trait Component: 'static + Send + Sync + Sized {
+    fn meta() -> ComponentMeta {
+        let name = std::any::type_name::<Self>();
+        let layout = std::alloc::Layout::new::<Self>();
+
+        // This shim function is monomorphized for Self.
+        // It knows how to drop Self properly.
+        unsafe fn drop_shim<T>(ptr: *mut u8) {
+            std::ptr::drop_in_place(ptr as *mut T);
+        }
+
+        ComponentMeta {
+            name,
+            layout,
+            drop_fn: drop_shim::<Self>,
+        }
+    }
+}
 impl<T: 'static + Send + Sync + Sized> Component for T {}
 
 pub struct ComponentRegistry {
@@ -197,7 +215,7 @@ impl ComponentRegistry {
             }
 
             let id = ComponentId(self.components.len());
-            let meta = ComponentMeta { name, layout };
+            let meta = T::meta();
             self.components.push(meta);
             id
         })

@@ -43,6 +43,9 @@ pub struct Entities {
     /// A stack of indices that have been freed and are ready for reuse.
     free_indices: Vec<u32>,
 
+    /// Stores weather an entity is initialized or not
+    is_initialized: Vec<bool>,
+
     /// The total number of live entities.
     len: usize,
 }
@@ -58,11 +61,13 @@ impl Entities {
         Self {
             generations: Vec::new(),
             free_indices: Vec::new(),
+            is_initialized: Vec::new(),
             len: 0,
         }
     }
 
     /// Allocates a new entity and returns its handle.
+    /// This does not imply initialization as it only reserves the ID.
     pub fn alloc(&mut self) -> Entity {
         let index = if let Some(i) = self.free_indices.pop() {
             i // We have a free index to reuse
@@ -70,6 +75,7 @@ impl Entities {
             // We know that we have no reusable indices, so we need to grow the generations array
             let i = self.generations.len() as u32;
             self.generations.push(0); // Generation starts at 0
+            self.is_initialized.push(false); // Not initialized yet
             i
         };
 
@@ -88,6 +94,8 @@ impl Entities {
 
         // Increment generation so any dangling pointers to the old entity become invalid.
         self.generations[index] += 1;
+        // Mark as uninitialized
+        self.is_initialized[index] = false;
 
         // We can now reuse this index.
         self.free_indices.push(entity.index());
@@ -98,6 +106,12 @@ impl Entities {
     /// Reserves a specific number of entities and returns them as a Vec.
     /// This is useful for batch-filling local thread allocators.
     pub fn alloc_batch(&mut self, count: usize) -> Vec<Entity> {
+        debug_assert!(count > 0, "alloc_batch called with count 0");
+        debug_assert!(
+            count <= u32::MAX as usize,
+            "alloc_batch called with count exceeding u32::MAX"
+        );
+
         let mut reserved = Vec::with_capacity(count);
 
         // 1. First, try to satisfy the request using recycled indices
@@ -118,7 +132,10 @@ impl Entities {
             let start_index = self.generations.len() as u32;
 
             // Extend the generations vector with 0s for the new entities
-            self.generations.extend(repeat_n(0, needed));
+            self.generations.extend(std::iter::repeat(0).take(needed));
+            // Extend the is_initialized vector with false for the new entities
+            self.is_initialized
+                .extend(std::iter::repeat(false).take(needed));
 
             // Generate the new Entity IDs
             for i in 0..needed {
@@ -130,11 +147,31 @@ impl Entities {
         reserved
     }
 
+    /// Mark the given entity as initialized.
+    /// This means it has a set of components associated with it.
+    pub fn initialize(&mut self, entity: Entity) {
+        let index = entity.index() as usize;
+        debug_assert!(
+            self.is_alive(entity),
+            "set_initialized called with dead entity"
+        );
+        self.is_initialized[index] = true;
+    }
+
     pub fn is_alive(&self, entity: Entity) -> bool {
         let index = entity.index() as usize;
         // 1. Check bounds
         // 2. Check if generations match
         index < self.generations.len() && self.generations[index] == entity.generation()
+    }
+
+    pub fn is_initialized(&self, entity: Entity) -> bool {
+        let index = entity.index() as usize;
+        debug_assert!(
+            self.is_alive(entity),
+            "is_initialized called with dead entity"
+        );
+        self.is_initialized[index]
     }
 
     pub fn len(&self) -> usize {

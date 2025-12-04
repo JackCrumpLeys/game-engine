@@ -1,54 +1,73 @@
 use std::alloc::{self, Layout};
+use std::any::type_name;
+use std::mem;
 use std::ptr::{self, NonNull, drop_in_place};
 
 use crate::borrow::AtomicBorrow;
+use crate::component::ComponentMeta;
+use crate::prelude::Component;
 
-pub struct Column {
+const BASE_LEN: usize = 64;
+
+pub struct TypeErasedSequence {
     ptr: NonNull<u8>,
     len: usize,
     capacity: usize,
     layout: Layout,
-    borrow_state: AtomicBorrow,
-    mutated_ticks: Vec<u32>,
+    drop_fn: unsafe fn(*mut u8),
+    #[cfg(debug_assertions)]
+    name: &'static str,
 }
 
-const BASE_COL_LEN: usize = 64;
-
-impl Column {
-    pub fn new(layout: Layout) -> Self {
-        // Hint: Layout::from_size_align(0, layout.align()) is useful for
-        // creating a dangling pointer for an empty vector.
-
-        Column {
-            ptr: if layout.size() > 0 {
-                Layout::from_size_align(0, layout.align())
-                    .map(|_| NonNull::dangling())
-                    .unwrap()
-            } else {
-                // For ZST, simple dangling pointer
-                NonNull::dangling()
-            },
+impl TypeErasedSequence {
+    pub fn new(meta: &ComponentMeta) -> Self {
+        TypeErasedSequence {
+            ptr: NonNull::dangling(),
             len: 0,
             capacity: 0,
-            layout,
-            borrow_state: AtomicBorrow::new(),
-            mutated_ticks: Vec::new(),
+            layout: meta.layout,
+            drop_fn: meta.drop_fn,
+            #[cfg(debug_assertions)]
+            name: meta.name,
         }
     }
 
-    pub fn borrow_state(&self) -> &AtomicBorrow {
-        &self.borrow_state
+    /// Makes a dummy TypeErasedSequence with zero length and capacity.
+    /// useful for
+    fn dummy() -> Self {
+        TypeErasedSequence {
+            ptr: NonNull::dangling(),
+            len: 0,
+            capacity: 0,
+            layout: Layout::from_size_align(0, 1).unwrap(),
+            drop_fn: |_ptr: *mut u8| {},
+            #[cfg(debug_assertions)]
+            name: "Dummy",
+        }
     }
 
-    /// Appends an element at the given tick.
+    /// Appends an element
     /// # Safety
-    /// The type T must match the Layout this column was created with.
-    pub unsafe fn push<T>(&mut self, value: T, tick: u32) {
+    /// The type T must match the Layout this TypeErasedSequence was created with.
+    pub unsafe fn push<T>(&mut self, value: T) {
+        #[cfg(debug_assertions)]
+        {
+            if self.name == "" {
+                self.name = type_name::<T>();
+            }
+        }
         // 1. Check if (len == capacity) -> grow()
         // 2. Calculate byte offset: len * layout.size()
         // 3. ptr::write the value
         // 4. len += 1
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            std::any::type_name::<T>(),
+            self.name,
+            "Type mismatch in push"
+        );
         debug_assert!(std::mem::size_of::<T>() == self.layout.size());
+        debug_assert!(std::mem::align_of::<T>() == self.layout.align());
 
         if self.len == self.capacity {
             self.grow();
@@ -67,13 +86,6 @@ impl Column {
             }
         }
 
-        if self.mutated_ticks.len() < self.len + 1 {
-            self.mutated_ticks.push(tick);
-        } else {
-            // If we are reusing capacity, overwrite
-            self.mutated_ticks[self.len] = tick;
-        }
-
         self.len += 1;
     }
 
@@ -83,11 +95,6 @@ impl Column {
 
     pub fn len(&self) -> usize {
         self.len
-    }
-
-    /// Get a pointer to the mutated ticks array.
-    pub fn get_ticks_ptr(&mut self) -> *mut u32 {
-        self.mutated_ticks.as_mut_ptr()
     }
 
     /// Returns a pointer to the element at index.
@@ -105,32 +112,96 @@ impl Column {
     /// Returns true if an element was actually moved (i.e. we didn't remove the very last one).
     /// panics if index is out of bounds.
     pub fn swap_remove(&mut self, index: usize) {
-        debug_assert!(self.len == self.mutated_ticks.len());
         assert!(index < self.len);
-        // 1. If index is NOT the last element:
-        //    Copy bits from (last_index) to (index)
-        // 2. len -= 1
-        // If we allow Drop types (like String), we MUST call drop_in_place here on the removed item.
 
-        if index != self.len - 1 {
-            let last_index = self.len - 1;
-            // SAFETY: We have already asserted index < len, so both indices are valid.
-            unsafe {
-                let src_ptr = self.ptr.as_ptr().add(last_index * self.layout.size());
-                let dst_ptr = self.ptr.as_ptr().add(index * self.layout.size());
-                drop_in_place(dst_ptr); // drop the pointer we about to overwrite
-                ptr::copy_nonoverlapping(src_ptr, dst_ptr, self.layout.size());
+        // 1. Calculate pointers
+        let size = self.layout.size();
+        unsafe {
+            let base_ptr = self.ptr.as_ptr();
+            let ptr_at_index = base_ptr.add(index * size);
+            let ptr_last = base_ptr.add((self.len - 1) * size);
+
+            // 2. Drop the item currently at `index` using our stored function
+            (self.drop_fn)(ptr_at_index);
+
+            // 3. If it wasn't the last item, move the last item into this slot
+            if index != self.len - 1 {
+                ptr::copy_nonoverlapping(ptr_last, ptr_at_index, size);
             }
-        } else {
-            // just drop the last element
-            unsafe {
-                let drop_ptr = self.ptr.as_ptr().add(index * self.layout.size());
-                drop_in_place(drop_ptr);
-            }
+
+            // Note: We do NOT drop ptr_last. We moved its bits to ptr_at_index.
+            // Ownership has effectively transferred to index.
         }
 
-        self.mutated_ticks.swap_remove(index);
         self.len -= 1;
+    }
+
+    /// Consumes `other`, moving its elements into `self`.
+    /// `other` is automatically dropped at the end of this function, freeing its buffer.
+    pub fn append(&mut self, mut other: TypeErasedSequence) {
+        // 1. Safety Checks
+        assert_eq!(self.layout.size(), other.layout.size());
+
+        // If other is empty, just let it drop immediately.
+        if other.len == 0 {
+            return;
+        }
+
+        // 2. Reserve space in self
+        self.reserve(other.len);
+
+        // 3. Bitwise Copy (The Move)
+        // We copy the bits from the source buffer to our buffer.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                other.ptr.as_ptr(),
+                self.ptr.as_ptr().add(self.len * self.layout.size()),
+                other.len * self.layout.size(),
+            );
+        }
+
+        // 4. Update Self Length
+        self.len += other.len;
+
+        // 5. Neutering `other` (CRITICAL)
+        // We moved the items. We must set other.len to 0 so that when it drops,
+        // it does NOT try to run destructors on the items we just stole.
+        other.len = 0;
+    }
+
+    // Fixed reserve logic from previous answer
+    pub fn reserve(&mut self, additional: usize) {
+        if self.layout.size() == 0 {
+            self.capacity = usize::MAX;
+            return;
+        }
+
+        if self.capacity - self.len >= additional {
+            return;
+        }
+
+        let old_capacity = self.capacity;
+        let mut new_capacity = (self.capacity + additional).max(4).next_power_of_two();
+
+        let new_size = new_capacity * self.layout.size();
+        let new_layout = Layout::from_size_align(new_size, self.layout.align()).unwrap();
+
+        unsafe {
+            let new_ptr = if old_capacity == 0 {
+                alloc::alloc(new_layout)
+            } else {
+                let old_layout =
+                    Layout::from_size_align(old_capacity * self.layout.size(), self.layout.align())
+                        .unwrap();
+                alloc::realloc(self.ptr.as_ptr(), old_layout, new_size)
+            };
+
+            if new_ptr.is_null() {
+                alloc::handle_alloc_error(new_layout);
+            }
+            self.ptr = NonNull::new_unchecked(new_ptr);
+            self.capacity = new_capacity;
+        }
     }
 
     fn grow(&mut self) {
@@ -141,65 +212,157 @@ impl Column {
         }
 
         // Standard vector resizing logic using std::alloc::realloc
-        self.capacity = if self.capacity == 0 {
-            BASE_COL_LEN
+        let new_len = if self.capacity == 0 {
+            BASE_LEN
         } else {
             self.capacity * 2
         };
 
-        // SAFETY: We ensure new_ptr is not null and properly aligned.
-        unsafe {
-            let new_size = self.capacity * self.layout.size();
-            let new_ptr = if self.capacity == BASE_COL_LEN {
-                alloc::alloc(Layout::from_size_align(new_size, self.layout.align()).unwrap())
-            } else {
-                alloc::realloc(
-                    self.ptr.as_ptr(),
-                    Layout::from_size_align(
-                        (self.capacity / 2) * self.layout.size(),
-                        self.layout.align(),
-                    )
-                    .unwrap(),
-                    new_size,
-                )
-            };
+        self.reserve(new_len - self.capacity);
+    }
+}
 
-            if new_ptr.is_null() {
-                alloc::handle_alloc_error(
-                    Layout::from_size_align(new_size, self.layout.align()).unwrap(),
-                );
+pub struct Column {
+    inner: TypeErasedSequence,
+    borrow_state: AtomicBorrow,
+    mutated_ticks: Vec<u32>,
+    tick: u32,
+}
+
+impl Column {
+    pub fn new<T: Component>() -> Self {
+        // Hint: Layout::from_size_align(0, layout.align()) is useful for
+        // creating a dangling pointer for an empty vector.
+
+        Column {
+            inner: TypeErasedSequence::new(&T::meta()),
+            borrow_state: AtomicBorrow::new(),
+            mutated_ticks: Vec::new(),
+            tick: 0,
+        }
+    }
+
+    pub fn from_meta(meta: &ComponentMeta) -> Self {
+        Column {
+            inner: TypeErasedSequence::new(meta),
+            borrow_state: AtomicBorrow::new(),
+            mutated_ticks: Vec::new(),
+            tick: 0,
+        }
+    }
+
+    pub fn borrow_state(&self) -> &AtomicBorrow {
+        &self.borrow_state
+    }
+
+    /// Appends an element at the given tick.
+    /// # Safety
+    /// The type T must match the Layout this column was created with.
+    /// Appends an element at the given tick.
+    pub unsafe fn push<T>(&mut self, value: T) {
+        unsafe { self.inner.push(value) };
+        self.mutated_ticks.push(self.tick);
+    }
+
+    pub fn inner(&self) -> &TypeErasedSequence {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut TypeErasedSequence {
+        &mut self.inner
+    }
+
+    pub fn push_ticks(&mut self, n: usize) {
+        self.mutated_ticks.extend(vec![self.tick; n])
+    }
+
+    pub fn layout(&self) -> Layout {
+        self.inner.layout
+    }
+
+    /// Appends another sequence to this column and updates the change detection ticks.
+    /// Consumes the other sequence.
+    pub fn append(&mut self, other: TypeErasedSequence) {
+        let count = other.len();
+
+        // 1. Move the raw component data
+        // TypeErasedSequence::append handles the raw memory copy and updates len
+        self.inner.append(other);
+
+        // 2. Synchronize ticks
+        // Every entity added via flush counts as "changed" on this tick.
+        self.mutated_ticks.reserve(count);
+        self.push_ticks(count);
+    }
+
+    pub fn set_tick(&mut self, tick: u32) {
+        self.tick = tick;
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len
+    }
+
+    /// Get a pointer to the mutated ticks array.
+    pub fn get_ticks_ptr(&mut self) -> *mut u32 {
+        self.mutated_ticks.as_mut_ptr()
+    }
+
+    /// Returns a pointer to the element at index.
+    /// panics if index is out of bounds.
+    pub fn get_ptr(&self, index: usize) -> *mut u8 {
+        self.inner.get_ptr(index)
+    }
+
+    /// Removes the element at index by swapping it with the last element.
+    /// Returns true if an element was actually moved (i.e. we didn't remove the very last one).
+    /// panics if index is out of bounds.
+    pub fn swap_remove(&mut self, index: usize) {
+        debug_assert!(self.len() == self.mutated_ticks.len());
+
+        self.inner.swap_remove(index);
+        self.mutated_ticks.swap_remove(index);
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        self.inner.reserve(additional);
+        self.mutated_ticks.reserve(additional);
+    }
+
+    fn grow(&mut self) {
+        self.inner.grow();
+    }
+}
+
+// Crucial: The Drop implementation for the container itself
+impl Drop for TypeErasedSequence {
+    fn drop(&mut self) {
+        // 1. Drop all the elements inside
+        if self.len > 0 && self.layout.size() > 0 {
+            unsafe {
+                let mut current_ptr = self.ptr.as_ptr();
+                for _ in 0..self.len {
+                    // Call the captured drop function for every element
+                    (self.drop_fn)(current_ptr);
+                    current_ptr = current_ptr.add(self.layout.size());
+                }
             }
+        }
 
-            self.ptr = NonNull::new_unchecked(new_ptr);
+        // 2. Free the backing memory
+        if self.capacity > 0 && self.layout.size() > 0 {
+            unsafe {
+                let total_bytes = self.capacity * self.layout.size();
+                let layout = Layout::from_size_align(total_bytes, self.layout.align()).unwrap();
+                alloc::dealloc(self.ptr.as_ptr(), layout);
+            }
         }
     }
 }
 
 impl Drop for Column {
     fn drop(&mut self) {
-        if self.capacity == 0 || self.layout.size() == 0 {
-            return; // nothing to free
-        }
-
         debug_assert!(self.borrow_state.borrow_mut());
-
-        for i in 0..self.len {
-            // SAFETY: We are in Drop, so no other references exist.
-            unsafe {
-                // destroy each element
-                let drop_ptr = self.ptr.as_ptr().add(i * self.layout.size());
-                drop_in_place(drop_ptr);
-            }
-        }
-
-        // SAFETY: We allocated this memory ourselves.
-        unsafe {
-            alloc::dealloc(
-                self.ptr.as_ptr(),
-                Layout::from_size_align(self.capacity * self.layout.size(), self.layout.align())
-                    .unwrap(),
-            );
-        }
     }
 }
 
@@ -208,16 +371,15 @@ mod tests {
     use super::*;
     #[test]
     fn test_column_push_and_get() {
-        let layout = Layout::new::<u32>();
-        let mut col = Column::new(layout);
+        let mut col = Column::new::<u32>();
 
         unsafe {
-            col.push(10u32, 0);
-            col.push(20u32, 0);
-            col.push(30u32, 0);
+            col.push(10u32);
+            col.push(20u32);
+            col.push(30u32);
         }
 
-        assert_eq!(col.len, 3);
+        assert_eq!(col.len(), 3);
 
         // Read back
         let p0 = col.get_ptr(0) as *const u32;
@@ -231,19 +393,18 @@ mod tests {
 
     #[test]
     fn test_swap_remove() {
-        let layout = Layout::new::<u32>();
-        let mut col = Column::new(layout);
+        let mut col = Column::new::<u32>();
 
         unsafe {
-            col.push(10u32, 0); // idx 0
-            col.push(20u32, 0); // idx 1
-            col.push(30u32, 0); // idx 2
+            col.push(10u32); // idx 0
+            col.push(20u32); // idx 1
+            col.push(30u32); // idx 2
 
             // Remove index 0. Element 30 should move to index 0.
             col.swap_remove(0);
         }
 
-        assert_eq!(col.len, 2);
+        assert_eq!(col.len(), 2);
         let p0 = col.get_ptr(0) as *const u32;
         unsafe {
             assert_eq!(*p0, 30);
@@ -253,21 +414,23 @@ mod tests {
     // tick tests
     #[test]
     fn test_mutated_ticks() {
-        let layout = Layout::new::<u32>();
-        let mut col = Column::new(layout);
+        let mut col = Column::new::<u32>();
 
         unsafe {
-            col.push(10u32, 1);
-            col.push(20u32, 2);
-            col.push(30u32, 3);
+            col.set_tick(1);
+            col.push(10u32);
+            col.set_tick(2);
+            col.push(20u32);
+            col.set_tick(3);
+            col.push(30u32);
         }
 
-        assert_eq!(col.mutated_ticks[..col.len], vec![1, 2, 3]);
+        assert_eq!(col.mutated_ticks[..col.len()], vec![1, 2, 3]);
 
         // Remove index 1
         col.swap_remove(1);
 
-        assert_eq!(col.len, 2);
-        assert_eq!(col.mutated_ticks[..col.len], vec![1, 3]);
+        assert_eq!(col.len(), 2);
+        assert_eq!(col.mutated_ticks[..col.len()], vec![1, 3]);
     }
 }

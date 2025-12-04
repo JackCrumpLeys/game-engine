@@ -68,7 +68,7 @@ impl AtomicBorrow {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ColumnBorrowChecker {
     borrows: ComponentMask,
     mut_borrows: ComponentMask,
@@ -190,9 +190,10 @@ impl ColumnBorrowChecker {
                     result.push((col.borrow_state(), true));
                 }
             } else if self.borrows.has(id.0)
-                && let Some(col) = arch.column(id) {
-                    result.push((col.borrow_state(), false));
-                }
+                && let Some(col) = arch.column(id)
+            {
+                result.push((col.borrow_state(), false));
+            }
         }
 
         result
@@ -210,9 +211,7 @@ impl ColumnBorrowChecker {
     /// panics on conflict.
     pub fn borrow_mut(&mut self, comp_id: ComponentId) {
         if !self.try_borrow(comp_id, true) {
-            panic!(
-                "conflicting mutable borrow detected for component {comp_id:?}"
-            );
+            panic!("conflicting mutable borrow detected for component {comp_id:?}");
         }
     }
 }
