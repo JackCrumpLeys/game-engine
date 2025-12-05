@@ -18,6 +18,17 @@ pub struct TypeErasedSequence {
     #[cfg(debug_assertions)]
     name: &'static str,
 }
+#[cfg(debug_assertions)]
+impl std::fmt::Debug for TypeErasedSequence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypeErasedSequence")
+            .field("len", &self.len)
+            .field("capacity", &self.capacity)
+            .field("layout", &self.layout)
+            .field("name", &self.name)
+            .finish()
+    }
+}
 
 impl TypeErasedSequence {
     pub fn new(meta: &ComponentMeta) -> Self {
@@ -86,6 +97,25 @@ impl TypeErasedSequence {
             }
         }
 
+        self.len += 1;
+    }
+
+    // SAFETY: Caller ensures capacity > len and T matches layout
+    #[inline(always)]
+    pub unsafe fn push_unchecked<T>(&mut self, value: T) {
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            std::any::type_name::<T>(),
+            self.name,
+            "Type mismatch in push"
+        );
+        debug_assert!(std::mem::size_of::<T>() == self.layout.size());
+        debug_assert!(std::mem::align_of::<T>() == self.layout.align());
+
+        let byte_offset = self.len * self.layout.size();
+        // Use fast pointer arithmetic
+        let dest = unsafe { self.ptr.as_ptr().add(byte_offset) as *mut T };
+        unsafe { std::ptr::write(dest, value) };
         self.len += 1;
     }
 

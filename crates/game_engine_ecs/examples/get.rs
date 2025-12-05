@@ -2,6 +2,7 @@
 use std::collections::HashMap;
 use std::ops::DerefMut;
 
+use game_engine_derive::Component;
 use game_engine_ecs::prelude::*;
 use game_engine_ecs::query::Mut;
 use game_engine_ecs::system::{Local, System, UnsafeWorldCell};
@@ -42,38 +43,39 @@ impl App {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Velocity {
     x: f32,
     y: f32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Rotation {
     radians: f32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct TransformMatrix {
     data: [f32; 16],
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Health {
     val: f32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Regen {
     rate: f32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Poisoned; // Marker component
 
+#[derive(Debug, Clone, Copy, Component)]
 struct LinkedTo(Entity);
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Position {
     x: f32,
     y: f32,

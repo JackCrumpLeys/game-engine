@@ -158,6 +158,8 @@ mod tests {
     #[derive(Debug, Default, PartialEq)]
     struct FrameCount(u32);
 
+    impl_component!(Position, Velocity, FrameCount);
+
     // ========================================================================
     // MOCK APP / SCHEDULER
     // ========================================================================

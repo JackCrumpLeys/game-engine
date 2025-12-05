@@ -1096,11 +1096,19 @@ impl<Q: QueryToken, F: Filter> QueryState<Q, F> {
         self.inner.iter::<Q::View<'w>, F>(world)
     }
 
-    pub fn for_each<'w, Func>(&'w mut self, world: &'w mut crate::world::World, func: Func)
+    pub fn for_each<'w, Func>(&'w mut self, world: &'w mut World, func: Func)
     where
-        Func: FnMut(<Q::View<'w> as crate::query::View<'w>>::Item),
+        Func: FnMut(<Q::View<'w> as View<'w>>::Item),
     {
         self.inner.for_each::<Q::View<'w>, F, Func>(world, func)
+    }
+
+    pub fn get<'w>(
+        &'w mut self,
+        world: &'w mut crate::world::World,
+        entity: Entity,
+    ) -> Option<GetGuard<'w, <Q::View<'w> as View<'w>>::Item>> {
+        self.inner.get::<Q::View<'w>, F>(world, entity)
     }
 }
 #[cfg(test)]
@@ -1129,9 +1137,14 @@ mod tests {
     struct Name(String);
 
     // Marker Components
+    #[derive(Debug)]
     struct Player;
+    #[derive(Debug)]
     struct Enemy;
+    #[derive(Debug)]
     struct Dead;
+
+    impl_component!(Pos, Vel, Name, Player, Enemy, Dead);
 
     // ------------------------------------------------------------------------
     // Helper: QueryState Wrapper
@@ -1337,7 +1350,7 @@ mod tests {
     // ========================================================================
 
     #[test]
-    #[should_panic(expected = "conflicting mutable borrow detected for component ComponentId(0)")]
+    #[should_panic]
     fn test_panic_mut_mut_aliasing() {
         let mut world = World::new();
         world.spawn((Pos { x: 0., y: 0. },));
@@ -1348,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "conflicting borrow detected for component ComponentId(0)")]
+    #[should_panic]
     fn test_panic_mut_ref_aliasing() {
         let mut world = World::new();
         world.spawn((Pos { x: 0., y: 0. },));

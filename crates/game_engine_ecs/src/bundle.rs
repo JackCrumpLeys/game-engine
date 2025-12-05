@@ -4,15 +4,17 @@ use crate::storage::TypeErasedSequence;
 use std::any::type_name;
 
 pub trait Bundle {
+    fn mask() -> ComponentMask;
+
     /// Returns the list of component IDs in this bundle.
     /// Registers them if not present.
-    fn component_ids(&self, registry: &mut ComponentRegistry) -> Vec<ComponentId>;
+    fn component_ids(registry: &mut ComponentRegistry) -> Vec<ComponentId>;
 
     /// Writes the bundle's data into the given TypeErasedSequences.
     /// # Safety
-    /// `seqs` must be sorted by Component ID.
-    /// `ids` must be the list of IDs for this bundle in the order of the returned `component_ids`.
-    unsafe fn put(self, seqs: Vec<&mut TypeErasedSequence>);
+    /// `columns` and `ids` must be perfectly aligned (index N in ids corresponds to index N in columns).
+    /// `ids` must contain ALL ComponentIds provided by this bundle.
+    unsafe fn put(self, columns: &mut [&mut TypeErasedSequence], ids: &[ComponentId]);
 }
 
 pub trait ManyRowBundle {
@@ -22,7 +24,9 @@ pub trait ManyRowBundle {
     ///
     /// # Safety
     /// `seqs` must be sorted by Component ID in the order of the returned `component_ids`.
-    unsafe fn put_many(self, seqs: Vec<&mut TypeErasedSequence>);
+    unsafe fn put_many(self, seqs: &mut [&mut TypeErasedSequence]);
+
+    fn len(&self) -> usize;
 }
 
 // Macro to implement Bundle for tuples (A, B, C...)
@@ -31,7 +35,16 @@ macro_rules! impl_bundle {
         impl<$($name: Component),*> Bundle for ($($name,)*) {
 
             #[inline(always)]
-            fn component_ids(&self, registry: &mut ComponentRegistry) -> Vec<ComponentId> {
+            fn mask() -> ComponentMask {
+                let mut mask = ComponentMask::new();
+                $(
+                    mask.set_id($name::get_id());
+                )*
+                mask
+            }
+
+            #[inline(always)]
+            fn component_ids(registry: &mut ComponentRegistry) -> Vec<ComponentId> {
                 // make sure no overlap
                 #[cfg(debug_assertions)]
                 {
@@ -47,14 +60,26 @@ macro_rules! impl_bundle {
                 )*]
             }
 
+
             #[inline(always)]
-            unsafe fn put(self, mut seqs: Vec<&mut TypeErasedSequence>) {
+            unsafe fn put(
+                self,
+                columns: &mut [&mut TypeErasedSequence],
+                ids: &[ComponentId] // These are the Archetype's sorted IDs
+            ) {
                 #[allow(non_snake_case)]
                 let ($($name,)*) = self;
 
                 unsafe {
                     $(
-                        seqs[$num].push($name);
+                        // 1. Find the column index for this component
+                        // Since `ids` is sorted (Archetypes are sorted), this is fast.
+                        // We use unwrap_unchecked because we know the archetype matches the bundle mask.
+                        let id = $name::get_id(); // Or registry lookup if not using static IDs
+                        let index = ids.binary_search(&id).unwrap_unchecked();
+
+                        // 2. Write directly to that column
+                        columns.get_unchecked_mut(index).push($name);
                     )*
                 }
             }
@@ -65,39 +90,41 @@ macro_rules! impl_bundle {
             type Item = ($($name,)*);
 
             #[inline(always)]
-            unsafe fn put_many(self, mut seqs: Vec<&mut TypeErasedSequence>) {
-                let items = std::mem::ManuallyDrop::new(self);
-                let base_ptr = items.as_ptr();
-                let len = items.len();
+            unsafe fn put_many(mut self, mut seqs: &mut [&mut TypeErasedSequence]) {
+                // 1. Setup pointers
+                let len = self.len();
+                let base_ptr = self.as_ptr();
 
-                // Calculate tuple size constant
-                const COUNT: usize = 0 $(+ { let _ = $num; 1 })*;
-
-                // 2. Reserve
-                // (Optional: Unroll this loop if needed, but the compiler usually handles it)
-                for i in 0..COUNT {
-                    let column = &mut *seqs[i];
-                    column.reserve(len);
+                // 2. Reserve all columns ONCE
+                for i in 0..seqs.len() {
+                    seqs[i].reserve(len);
                 }
 
-                unsafe {
-                    // 3. Hot Loop
-                    for i in 0..len {
+                // 3. Hot Loop (Copy Memory)
+                for i in 0..len {
+                    unsafe {
                         let item_ptr = base_ptr.add(i);
-
                         $(
-                            let column = &mut *seqs[$num];
-
-                            // Get field pointer: &(tuple).0
+                            // Read from Vec buffer
                             let field_ptr = std::ptr::addr_of!((*item_ptr).$num);
+                            let val = std::ptr::read(field_ptr);
 
-                            // Move payload
-                            let component = std::ptr::read(field_ptr);
-
-                            column.push(component);
+                            // Write to Column (Unchecked, we reserved above)
+                            seqs[$num].push_unchecked(val);
                         )*
                     }
                 }
+
+                // We set len to 0.
+                // When `self` drops at the end of this function:
+                // - It sees len 0, so it calls destructors on 0 items (Correct, we moved them).
+                // - It sees capacity > 0, so it deallocates the backing buffer
+                self.set_len(0);
+            }
+
+            #[inline(always)]
+            fn len(&self) -> usize {
+                self.len()
             }
         }
     }
@@ -105,14 +132,21 @@ macro_rules! impl_bundle {
 
 // Implement for Unit
 impl Bundle for () {
-    fn component_ids(&self, _r: &mut ComponentRegistry) -> Vec<ComponentId> {
+    fn component_ids(_r: &mut ComponentRegistry) -> Vec<ComponentId> {
         vec![]
     }
-    unsafe fn put(self, _s: Vec<&mut TypeErasedSequence>) {}
+    unsafe fn put(self, columns: &mut [&mut TypeErasedSequence], ids: &[ComponentId]) {}
+
+    fn mask() -> ComponentMask {
+        ComponentMask::new()
+    }
 }
 impl ManyRowBundle for Vec<()> {
     type Item = ();
-    unsafe fn put_many(self, _s: Vec<&mut TypeErasedSequence>) {}
+    unsafe fn put_many(self, _s: &mut [&mut TypeErasedSequence]) {}
+    fn len(&self) -> usize {
+        0
+    }
 }
 
 // Call the macro

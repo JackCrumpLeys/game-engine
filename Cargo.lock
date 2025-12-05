@@ -798,7 +798,7 @@ dependencies = [
  "lebe",
  "miniz_oxide",
  "rayon-core",
- "smallvec",
+ "smallvec 1.15.1",
  "zune-inflate",
 ]
 
@@ -936,6 +936,8 @@ name = "game_engine_ecs"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "game_engine_derive",
+ "smallvec 2.0.0-alpha.12",
 ]
 
 [[package]]
@@ -1084,7 +1086,7 @@ dependencies = [
  "icu_normalizer_data",
  "icu_properties",
  "icu_provider",
- "smallvec",
+ "smallvec 1.15.1",
  "zerovec",
 ]
 
@@ -1136,7 +1138,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
 dependencies = [
  "idna_adapter",
- "smallvec",
+ "smallvec 1.15.1",
  "utf8_iter",
 ]
 
@@ -1951,7 +1953,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "redox_syscall 0.5.18",
- "smallvec",
+ "smallvec 1.15.1",
  "windows-link",
 ]
 
@@ -2392,7 +2394,7 @@ dependencies = [
  "rustc_codegen_spirv-types",
  "rustix 1.1.2",
  "sanitize-filename",
- "smallvec",
+ "smallvec 1.15.1",
  "spirt",
  "spirv-std-types",
  "spirv-tools",
@@ -2674,6 +2676,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "smallvec"
+version = "2.0.0-alpha.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef784004ca8777809dcdad6ac37629f0a97caee4c685fcea805278d81dd8b857"
+
+[[package]]
 name = "smithay-client-toolkit"
 version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2725,7 +2733,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
- "smallvec",
+ "smallvec 1.15.1",
 ]
 
 [[package]]
@@ -3101,7 +3109,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sharded-slab",
- "smallvec",
+ "smallvec 1.15.1",
  "thread_local",
  "tracing",
  "tracing-core",
@@ -3235,7 +3243,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slabbin",
- "smallvec",
+ "smallvec 1.15.1",
  "thread_local",
  "vk-parse",
  "vulkano-macros",
@@ -3366,7 +3374,7 @@ dependencies = [
  "downcast-rs",
  "rustix 1.1.2",
  "scoped-tls",
- "smallvec",
+ "smallvec 1.15.1",
  "wayland-sys",
 ]
 

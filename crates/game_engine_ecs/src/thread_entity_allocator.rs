@@ -51,6 +51,36 @@ impl LocalThreadEntityAllocator {
             .expect("Refill should have populated entities")
     }
 
+    /// Allocates a batch of Entities.
+    /// Optimized to fetch the exact required amount from global state if the local
+    /// cache is insufficient, bypassing the exponential growth logic used for single allocations.
+    pub fn alloc_batch(&mut self, current_tick: u32, count: usize) -> Vec<Entity> {
+        self.sync_tick(current_tick);
+
+        // 1. If we have enough in the buffer, just take them from the end (LIFO-ish for cache, but FIFO for IDs)
+        if self.next_entities.len() >= count {
+            let start_index = self.next_entities.len() - count;
+            return self.next_entities.drain(start_index..).collect();
+        }
+
+        let mut result = Vec::with_capacity(count);
+
+        // 2. Drain whatever we currently have in the cache
+        result.append(&mut self.next_entities);
+
+        // 3. Allocate the EXACT difference from the global allocator
+        let needed = count - result.len();
+        if needed > 0 {
+            let mut global = self.global_allocator.write().unwrap();
+            let batch = global.alloc_batch(needed);
+            result.extend(batch);
+        }
+
+        self.refill();
+
+        result
+    }
+
     /// Refills the local pool of entities from the global allocator.
     ///
     /// Multiplies the batch size by `GROWTH_FACTOR`, up to `MAX_BATCH_SIZE`.

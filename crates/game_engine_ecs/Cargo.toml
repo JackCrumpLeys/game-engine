@@ -3,6 +3,10 @@ name = "game_engine_ecs"
 version = "0.1.0"
 edition = "2024"
 
+[dependencies]
+smallvec.workspace = true
+game_engine_derive.workspace = true
+
 [dev-dependencies]
 criterion = "0.8"
 
@@ -10,6 +14,7 @@ criterion = "0.8"
 lto = "fat"
 opt-level = 3
 codegen-units = 1
+debug = true
 
 [profile.bench]
 lto = "fat"

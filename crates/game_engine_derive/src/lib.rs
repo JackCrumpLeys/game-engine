@@ -92,8 +92,36 @@ fn expand_struct_fields(fields: &Fields) -> proc_macro2::TokenStream {
     }
 }
 
+#[proc_macro_derive(Component)]
+pub fn derive_component(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident;
+
+    let expanded = quote! {
+        impl game_engine_ecs::component::Component for #name {
+            #[inline(always)]
+            fn get_id() -> game_engine_ecs::component::ComponentId {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                // Unique static per type instantiation
+                static CACHED_ID: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+                let id = CACHED_ID.load(Ordering::Relaxed);
+                if id != usize::MAX {
+                    return game_engine_ecs::component::ComponentId(id);
+                }
+
+                // Fallback to global allocator
+                let new_id = game_engine_ecs::component::allocate_component_id::<Self>();
+                CACHED_ID.store(new_id.0, Ordering::Relaxed);
+                new_id
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
 /// Helper to check if the #[interpolate] attribute is present
 fn has_interpolate_attr(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| attr.path().is_ident("interpolate"))
 }
-

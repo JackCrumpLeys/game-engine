@@ -1,3 +1,5 @@
+use smallvec::SmallVec;
+
 use crate::archetype::{Archetype, ArchetypeId};
 use crate::bundle::{Bundle, ManyRowBundle};
 use crate::component::{ComponentId, ComponentMask, ComponentRegistry};
@@ -61,6 +63,8 @@ struct EntityInsertBuffer {
     ids: Vec<Vec<Entity>>,
     /// Mask per archetype to add, in sorted order (use binary search to find and insert)
     masks: Vec<ComponentMask>,
+    /// Cache sorted component ids per archetype
+    comp_ids: Vec<Vec<ComponentId>>,
     /// The columns for each archetype's buffered entities
     /// It is in the order of:
     ///  * ComponentMask
@@ -90,6 +94,7 @@ impl EntityInsertBuffer {
                 self.masks.insert(index, mask);
                 self.ids.insert(index, Vec::new());
                 self.bundle_cols.insert(index, Vec::new());
+                self.comp_ids.insert(index, Vec::new());
                 index
             }
         }
@@ -101,16 +106,22 @@ impl EntityInsertBuffer {
         bundle: B,
         component_registry: &mut ComponentRegistry,
     ) {
-        let bun_comp_ids = bundle.component_ids(component_registry);
-        let mask = ComponentMask::from_ids(&bun_comp_ids);
-        let comp_ids = mask.to_ids();
+        let mask = B::mask();
 
         let arch_index = self.get_or_create_archetype_buffer(mask);
         let bundle_cols = &mut self.bundle_cols[arch_index];
 
+        let mut component_ids = &self.comp_ids[arch_index];
+
+        if component_ids.is_empty() {
+            self.comp_ids[arch_index] = B::component_ids(component_registry);
+            self.comp_ids[arch_index].sort_unstable();
+
+            component_ids = &self.comp_ids[arch_index];
+        }
+
         if bundle_cols.is_empty() {
-            // Initialize columns
-            for &comp_id in &comp_ids {
+            for &comp_id in component_ids {
                 let meta = component_registry
                     .get_meta(comp_id)
                     .expect("ComponentId not found in registry");
@@ -118,32 +129,14 @@ impl EntityInsertBuffer {
             }
         }
 
-        let mut ordered_cols = Vec::with_capacity(bun_comp_ids.len());
+        // Ensure components are registered so metadata exists
 
-        // We get a raw pointer to the start of the vector.
-        // This allows us to calculate offsets without fighting the borrow checker.
-        let base_ptr = bundle_cols.as_mut_ptr();
-
-        for id in &bun_comp_ids {
-            // 1. Find the index of the component in the storage.
-            // `comp_ids` comes from a Mask, so it is strictly sorted, allowing O(log n) lookup.
-            let storage_index = comp_ids
-                .binary_search(id)
-                .expect("Logic Error: Bundle ID must exist in the calculated mask IDs");
-
-            // 2. Grab the mutable reference.
-            unsafe {
-                // SAFETY:
-                // 1. `storage_index` is guaranteed valid by the binary_search above.
-                // 2. `bun_comp_ids` must not contain duplicate IDs (Bundles imply uniqueness).
-                //    If duplicates existed, we would create aliased mutable references (UB).
-                ordered_cols.push(&mut *base_ptr.add(storage_index));
-            }
-        }
-
-        // Safety: We just ensured the columns exist.
         unsafe {
-            bundle.put(ordered_cols);
+            // Note: bundle_cols elements match comp_ids order perfectly because both are sorted by ID
+            bundle.put(
+                &mut bundle_cols.iter_mut().collect::<Vec<_>>(),
+                &component_ids,
+            );
         }
 
         self.ids[arch_index].push(entity);
@@ -250,23 +243,23 @@ impl World {
         ent
     }
 
-    /// Spawns a new entity with a given id.
     pub fn spawn_with_id<B: Bundle>(&mut self, entity: Entity, bundle: B) {
-        let comp_ids = bundle.component_ids(&mut self.registry);
-        let mask = ComponentMask::from_ids(&comp_ids);
+        // Register components ensuring metadata exists
+        B::component_ids(&mut self.registry);
 
-        // We need the IDs corresponding to the storage order (sorted)
-        // to map the Bundle IDs to indices.
-        let sorted_ids = mask.to_ids();
-
+        let mask = B::mask();
         let arch_id = self.get_or_create_archetype(mask);
         let arch = &mut self.archetypes[arch_id];
         let row = arch.push_entity(entity);
 
-        // 1. Collect columns in Storage Order (Sorted by ID)
-        // We collect into a Vec to get a stable memory region of references.
-        let mut sorted_seqs: Vec<&mut TypeErasedSequence> = arch
-            .columns_mut()
+        // Split borrow manually to satisfy borrow checker
+        let arch_ids = &arch.component_ids;
+        let arch_cols_storage = &mut arch.columns;
+
+        // Collect mutable references to columns into SmallVec
+        let mut arch_cols: SmallVec<&mut TypeErasedSequence, 16> = arch_cols_storage
+            .iter_mut()
+            .filter_map(|c| c.as_deref_mut())
             .map(|col| {
                 col.set_tick(self.current_tick);
                 col.push_ticks(1);
@@ -274,84 +267,120 @@ impl World {
             })
             .collect();
 
-        // 2. Create the result vector
-        let mut ordered_seqs = Vec::with_capacity(comp_ids.len());
-
-        // Get raw pointer to the slice of mutable references
-        let base_ptr = sorted_seqs.as_mut_ptr();
-
-        for id in &comp_ids {
-            // Find which column index corresponds to this Bundle Component ID
-            // Since sorted_ids is sorted, this is O(log n)
-            let storage_idx = sorted_ids
-                .binary_search(id)
-                .expect("Logic Error: Bundle ID missing from calculated mask");
-
-            unsafe {
-                // SAFETY:
-                // 1. `storage_idx` is valid via binary_search.
-                // 2. We use `ptr::read` to copy the `&mut` reference.
-                // 3. We must assume `comp_ids` (the Bundle) has NO duplicate IDs.
-                //    If it did, we would create two aliasing `&mut` refs (UB).
-                // 4. `sorted_seqs` is dropped at the end of this block, so we don't
-                //    accidentally use the original references and the new ones simultaneously.
-                ordered_seqs.push(std::ptr::read(base_ptr.add(storage_idx)));
-            }
-        }
-
-        // Safety: We just pushed a new entity, so the last row is valid for writing.
-        // Implementors of Bundle must ensure they only write components that exist in the
-        // archetype.
         unsafe {
-            bundle.put(ordered_seqs);
+            bundle.put(&mut arch_cols, arch_ids);
         }
 
         self.entities.write().unwrap().initialize(entity);
-        self.entity_index.resize(
-            (entity.index() as usize + 1).max(self.entity_index.len()),
-            None,
-        );
 
-        self.entity_index[entity.index() as usize] = Some(EntityLocation {
+        // Optimistic resize
+        let idx = entity.index() as usize;
+        if idx >= self.entity_index.len() {
+            self.entity_index.resize(idx + 1, None);
+        }
+
+        self.entity_index[idx] = Some(EntityLocation {
             archetype_id: arch_id,
             row,
         });
     }
 
-    /// Flushes the insert buffer, moving all deferred entities into their respective archetypes.
-    /// This should typically be called at the end of a frame or before a query execution.
+    pub fn spawn_batch<BM, B: Bundle>(&mut self, bundles: BM) -> Vec<Entity>
+    where
+        BM: ManyRowBundle<Item = B>,
+    {
+        let b_order = B::component_ids(&mut self.registry);
+
+        let mask = B::mask();
+        let real_order = mask.to_ids(); // Sorted
+        let arch_id = self.get_or_create_archetype(mask);
+        let count = bundles.len();
+
+        let entities = self
+            .entity_allocator()
+            .alloc_batch(self.current_tick, count);
+
+        let arch = &mut self.archetypes[arch_id];
+        let start_row = arch.len();
+
+        let mut entities_guard = self.entities.write().unwrap();
+        for (i, &e) in entities.iter().enumerate() {
+            let row = start_row + i;
+            let idx = e.index() as usize;
+            if idx >= self.entity_index.len() {
+                self.entity_index.resize(idx + 1, None);
+            }
+            self.entity_index[idx] = Some(EntityLocation {
+                archetype_id: arch_id,
+                row,
+            });
+            entities_guard.initialize(e);
+        }
+
+        arch.push_entities(&entities);
+
+        let mut arch_cols: SmallVec<&mut TypeErasedSequence, 16> = arch
+            .columns_mut()
+            .map(|col| {
+                col.set_tick(self.current_tick);
+                col.push_ticks(count);
+                col.inner_mut()
+            })
+            .collect();
+
+        let mut ordered_cols: SmallVec<&mut TypeErasedSequence, 16> =
+            SmallVec::with_capacity(b_order.len());
+
+        unsafe {
+            for id in b_order {
+                // 1. Find the index in real_order (which corresponds to arch_cols indices)
+                // SAFETY: We assume B::mask() ensures the Bundle components are a subset
+                // of the archetype. unwrap_unchecked removes the panic branch.
+                let idx = real_order.binary_search(&id).unwrap_unchecked();
+
+                // 2. Get the reference from the source vector without bounds checking.
+                // SAFETY: binary_search returned a valid index.
+                let col_ref = arch_cols.get_unchecked_mut(idx);
+
+                // 3. Cast the &mut T to *mut T.
+                // Pointers are `Copy`, so this bypasses the borrow checker preventing
+                // us from moving/copying a mutable ref.
+                let ptr: *mut TypeErasedSequence = *col_ref;
+
+                // 4. Turn it back into &mut T and push to the new list.
+                // SAFETY: Crucial! This is safe ONLY if `b_order` contains unique IDs.
+                // If `b_order` requested the same component twice, we would create
+                // two mutable references to the same memory (UB).
+                // Assuming standard ECS Bundle rules, IDs are unique.
+                ordered_cols.push(&mut *ptr);
+            }
+        }
+
+        unsafe {
+            bundles.put_many(&mut ordered_cols);
+        }
+
+        entities
+    }
+
     pub fn flush(&mut self) {
         if self.insert_buffer.is_empty() {
             return;
         }
 
-        // 1. Take ownership of the buffer data to avoid borrow conflicts with `self`
-        //    (we need to mutate self.archetypes while iterating the buffer).
         let mut buffer = std::mem::take(&mut self.insert_buffer);
         let count = buffer.len();
 
         for i in 0..count {
             let mask = buffer.masks[i];
-            // 2. Resolve the destination archetype
             let arch_id = self.get_or_create_archetype(mask);
-
-            // 3. Prepare to move data
             let entities = &buffer.ids[i];
-
-            // Get the component IDs associated with this mask (sorted)
             let comp_ids = mask.to_ids();
-
-            // Extract the columns from the buffer.
-            // These are guaranteed to be in the same order as comp_ids by EntityInsertBuffer logic.
             let mut src_cols = std::mem::take(&mut buffer.bundle_cols[i]);
 
-            // 4. Batch append data to the archetype
             let arch = &mut self.archetypes[arch_id];
-
-            // Record where these new entities start in the archetype
             let start_row = arch.len();
 
-            // Zip the ComponentId with the source TypeErasedSequence and append to destination Column
             for (src_seq, &comp_id) in src_cols.drain(..).zip(comp_ids.iter()) {
                 let dest_col = arch
                     .column_mut(&comp_id)
@@ -361,8 +390,6 @@ impl World {
                 dest_col.append(src_seq);
             }
 
-            // 5. Update Entity Index & Archetype Entity List
-            // We need to resize the index map if new entity IDs are out of bounds
             let mut max_idx = 0;
             for &e in entities {
                 max_idx = max_idx.max(e.index() as usize);
@@ -372,27 +399,18 @@ impl World {
             }
 
             let mut entities_guard = self.entities.write().unwrap();
-
-            // Register entity in the archetype (this just pushes to the archetype's entity vec)
-            // We rely on the Column::append above to have already handled the data rows.
             arch.push_entities(entities);
+
             for (i, &entity) in entities.iter().enumerate() {
-                // Update the global lookup
                 let row = start_row + i;
                 self.entity_index[entity.index() as usize] = Some(EntityLocation {
                     archetype_id: arch_id,
                     row,
                 });
-
-                // Mark initialized in the allocator
                 entities_guard.initialize(entity);
             }
         }
-
-        // Buffer is local and dropped here, effectively clearing it.
-        // self.insert_buffer is already empty because we used mem::take.
     }
-
     /// Spawns an entity with the given bundle, deferring the actual insertion until later.
     pub fn spawn_deferred_with_id<B: Bundle>(&mut self, bundle: B, id: Entity) {
         self.insert_buffer
@@ -491,4 +509,171 @@ fn test_world_spawn_despawn() {
 
     // Despawn again should fail
     assert!(!world.despawn(e1));
+}
+#[cfg(test)]
+mod batch_tests {
+    use crate::prelude::*;
+    use crate::world::World;
+
+    #[derive(Debug, PartialEq, Default, Clone, Copy)]
+    struct Pos {
+        x: f32,
+        y: f32,
+    }
+
+    #[derive(Debug, PartialEq, Default, Clone, Copy)]
+    struct Vel {
+        x: f32,
+        y: f32,
+    }
+
+    #[derive(Debug, PartialEq, Default, Clone, Copy)]
+    struct Health(f32);
+
+    impl_component!(Pos, Vel, Health);
+
+    #[test]
+    fn test_spawn_batch_len_and_ids() {
+        let mut world = World::new();
+        let count = 10_000;
+
+        let mut batch = Vec::with_capacity(count);
+        for i in 0..count {
+            batch.push((
+                Pos {
+                    x: i as f32,
+                    y: 0.0,
+                },
+                Vel {
+                    x: i as f32,
+                    y: i as f32,
+                },
+            ));
+        }
+
+        let entities = world.spawn_batch(batch);
+
+        // Assert: Return value is exact
+        assert_eq!(entities.len(), count);
+
+        // Assert: Global state covers the count (>= because thread allocator might buffer a few extra from previous ops)
+        assert!(world.entities().len() >= count);
+
+        // Assert: Data Integrity via Query (The real truth source)
+        let mut query = crate::query::QueryState::<(&Pos, &Vel)>::new(&mut world.registry);
+        assert_eq!(query.iter(&mut world).count(), count);
+    }
+
+    #[test]
+    fn test_spawn_batch_fragmentation() {
+        let mut world = World::new();
+
+        // 1. Spawn single entity (Allocates 16 globally, caches 15)
+        let e1 = world.spawn((Health(100.0),));
+
+        // 2. Spawn batch 100
+        // (Uses the 15 cached, allocates 85 globally. Cache empty.)
+        let batch_size = 100;
+        let mut batch = Vec::new();
+        for i in 0..batch_size {
+            batch.push((
+                Pos {
+                    x: i as f32,
+                    y: 0.0,
+                },
+                Vel::default(),
+            ));
+        }
+
+        // 3. Spawn single (Allocates 16 globally, caches 15)
+        let e2 = world.spawn((Health(50.0),));
+
+        world.spawn_batch(batch);
+
+        // Total User Entities: 1 + 100 + 1 = 102
+        // Total Global IDs: 16 (first alloc) + 85 (batch remainder) + 16 (last alloc) = 117
+
+        let expected_user_count = batch_size + 2;
+
+        // Check actual live entities in query
+        let mut q_all = crate::query::QueryState::<Entity>::new(&mut world.registry);
+        assert_eq!(q_all.iter(&mut world).count(), expected_user_count);
+
+        // Check Entity Allocator State
+        // We assert >= because the allocator holds reserved IDs
+        assert!(world.entities().len() >= expected_user_count);
+
+        // Data Checks...
+        let mut q_health = crate::query::QueryState::<&Health>::new(&mut world.registry);
+        assert_eq!(q_health.get(&mut world, e1).unwrap().0, 100.0);
+        assert_eq!(q_health.get(&mut world, e2).unwrap().0, 50.0);
+    }
+
+    #[test]
+    fn test_spawn_batch_zst() {
+        // Zero Sized Types often trip up pointer arithmetic if not careful
+        #[derive(Clone, Debug)]
+        struct Marker;
+
+        impl_component!(Marker);
+
+        let mut world = World::new();
+        let count = 50;
+        let batch = vec![(Marker,); count];
+
+        let entities = world.spawn_batch(batch);
+
+        assert_eq!(entities.len(), count);
+
+        let mut query = crate::query::QueryState::<&Marker>::new(&mut world.registry);
+        assert_eq!(query.iter(&mut world).count(), count);
+    }
+
+    #[test]
+    fn test_spawn_batch_empty() {
+        let mut world = World::new();
+        let batch: Vec<(Pos,)> = Vec::new();
+
+        let entities = world.spawn_batch(batch);
+
+        assert!(entities.is_empty());
+        assert_eq!(world.entities().len(), 0);
+    }
+
+    #[test]
+    fn test_spawn_batch_component_ordering() {
+        // Tests that column mapping works even if Bundle order != Component ID order
+        let mut world = World::new();
+
+        // We rely on ComponentRegistry to assign IDs.
+        // We purposely construct a bundle where we might expect ID mismatch if sorted incorrectly.
+        // But since we can't force IDs easily, we trust the logic:
+        // Bundle: (Vel, Pos) -> IDs might be [1, 0]
+        // Archetype: [0, 1]
+
+        let mut batch = Vec::new();
+        for i in 0..10 {
+            // Note: Vel is first here
+            batch.push((
+                Vel {
+                    x: i as f32,
+                    y: 0.0,
+                },
+                Pos {
+                    x: 100.0,
+                    y: i as f32,
+                },
+            ));
+        }
+
+        world.spawn_batch(batch);
+
+        let mut query = crate::query::QueryState::<(&Pos, &Vel)>::new(&mut world.registry);
+        for (pos, vel) in query.iter(&mut world) {
+            // Pos.x should be 100 (from 2nd slot in tuple)
+            assert_eq!(pos.x, 100.0);
+            // Vel.x should be index (from 1st slot in tuple)
+            assert_eq!(vel.x, pos.y);
+        }
+    }
 }

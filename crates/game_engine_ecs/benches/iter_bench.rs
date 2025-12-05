@@ -2,6 +2,7 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use game_engine_derive::Component;
 use game_engine_ecs::query::{QueryState, With};
 use game_engine_ecs::world::World;
 
@@ -10,14 +11,14 @@ use game_engine_ecs::world::World;
 // ============================================================================
 
 // 1. Standard "Hot" Components (16 bytes)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Component)]
 struct Position {
     x: f32,
     y: f32,
     z: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Component)]
 struct Velocity {
     dx: f32,
     dy: f32,
@@ -25,7 +26,7 @@ struct Velocity {
 }
 
 // 2. Heavy Math Component (64 bytes) - Simulates a Transform Matrix
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Component)]
 struct TransformMatrix {
     m: [f32; 16],
 }
@@ -39,15 +40,19 @@ impl Default for TransformMatrix {
 // 3. "Cold" / Bloat Component (4096 bytes)
 // Used to test Cache Locality. In AoS, this destroys performance.
 // In ECS (SoA), this should be skipped entirely.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Component)]
 struct MeshData {
     _bloat: [u8; 4096],
 }
 
 // 4. Tags for Fragmentation / Filtering
+#[derive(Debug, Clone, Copy, Component)]
 struct TagA;
+#[derive(Debug, Clone, Copy, Component)]
 struct TagB;
+#[derive(Debug, Clone, Copy, Component)]
 struct TagC;
+#[derive(Debug, Clone, Copy, Component)]
 struct TagD;
 
 // ============================================================================

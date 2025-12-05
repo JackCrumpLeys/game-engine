@@ -30,6 +30,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.dependencies]
+smallvec = "2.0.0-alpha.12"
 game_engine_derive = { path = "crates/game_engine_derive" }
 game_engine_shaders = { path = "crates/game_engine_shaders" }
 game_engine_shaders_types = { path = "crates/game_engine_shaders_types" }

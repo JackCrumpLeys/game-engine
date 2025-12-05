@@ -1,4 +1,5 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use game_engine_derive::Component;
 use std::hint::black_box;
 
 // Adjust this crate name to match your Cargo.toml name
@@ -9,39 +10,39 @@ use game_engine_ecs::system::{System, UnsafeWorldCell};
 // COMPONENTS
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Position {
     x: f32,
     y: f32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Velocity {
     x: f32,
     y: f32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Rotation {
     radians: f32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct TransformMatrix {
     data: [f32; 16],
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Health {
     val: f32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Regen {
     rate: f32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Component)]
 struct Poisoned; // Marker component
 
 // ============================================================================
@@ -220,34 +221,44 @@ fn bench_allocation(c: &mut Criterion) {
     let mut group = c.benchmark_group("Allocation (Spawn 20k)");
 
     group.bench_function("ECS Spawn", |b| {
-        b.iter(|| {
-            let mut world = World::new();
-            for i in 0..ENTITY_COUNT {
-                let pos = Position {
-                    x: i as f32,
-                    y: 0.0,
-                };
-                let vel = Velocity { x: 1.0, y: 1.0 };
-                let rot = Rotation { radians: 0.0 };
-                let hp = Health { val: 100.0 };
+        b.iter_batched(
+            World::new,
+            |mut world| {
+                let mut world = &mut World::new();
+                for i in 0..ENTITY_COUNT {
+                    let pos = Position {
+                        x: i as f32,
+                        y: 0.0,
+                    };
+                    let vel = Velocity { x: 1.0, y: 1.0 };
+                    let rot = Rotation { radians: 0.0 };
+                    let hp = Health { val: 100.0 };
 
-                // Fragment data to stress archetype creation
-                if i.is_multiple_of(2) {
-                    world.spawn_deferred((
-                        pos,
-                        vel,
-                        rot,
-                        hp,
-                        Regen { rate: 1.0 },
-                        TransformMatrix::default(),
-                    ));
-                } else {
-                    world.spawn_deferred((pos, vel, rot, hp, Poisoned, TransformMatrix::default()));
+                    // Fragment data to stress archetype creation
+                    if i.is_multiple_of(2) {
+                        world.spawn_deferred((
+                            pos,
+                            vel,
+                            rot,
+                            hp,
+                            Regen { rate: 1.0 },
+                            TransformMatrix::default(),
+                        ));
+                    } else {
+                        world.spawn_deferred((
+                            pos,
+                            vel,
+                            rot,
+                            hp,
+                            Poisoned,
+                            TransformMatrix::default(),
+                        ));
+                    }
                 }
-            }
-            world.flush();
-            black_box(world);
-        })
+                world.flush();
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.bench_function("Vec Push", |b| {
