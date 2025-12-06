@@ -46,6 +46,10 @@ pub struct PassManager {
     subbuffer_allocator: SubbufferAllocator,
 }
 
+mod gpu_shaders {
+    include!(concat!(env!("OUT_DIR"), "/spiv_shaders.rs"));
+}
+
 // Eventully we will have much more of a multi file layout and proper render graph
 pub struct Buffers {
     pub vertex_buffer: Subbuffer<[VulVertex]>,
@@ -101,12 +105,6 @@ impl PassManager {
 
         // print!(env!("game_engine_shaders.spv"));
 
-        mod shaders {
-            vulkano_shaders::shader! {
-                bytes: "/home/jackc/Documents/code/rust/game_engine/target/spirv-builder/spirv-unknown-vulkan1.4/release/deps/game_engine_shaders.spv"
-            }
-        }
-
         // Before we draw, we have to create what is called a **pipeline**. A pipeline describes
         // how a GPU operation is to be performed. It is similar to an OpenGL program, but it also
         // contains many settings for customization, all baked into a single object. For drawing,
@@ -117,10 +115,10 @@ impl PassManager {
             //
             // A Vulkan shader can in theory contain multiple entry points, so we have to specify
             // which one.
-            let vs = shaders::load(device.clone())?
+            let vs = gpu_shaders::game_engine_shaders::load(device.clone())?
                 .entry_point("main_vs")
                 .unwrap();
-            let fs = shaders::load(device.clone())?
+            let fs = gpu_shaders::game_engine_shaders::load(device.clone())?
                 .entry_point("main_fs")
                 .unwrap();
 
