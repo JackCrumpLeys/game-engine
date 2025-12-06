@@ -243,6 +243,24 @@ impl ComponentRegistry {
         id
     }
 
+    pub fn bulk_manual_register(&mut self, ids: &[ComponentId], metas: &[ComponentMeta]) {
+        for (meta, id) in metas.iter().zip(ids.iter()) {
+            if id.0 >= MAX_COMPONENTS {
+                panic!("Exceeded maximum number of components: {}", MAX_COMPONENTS);
+            }
+
+            // Ensure vector is large enough for this ID
+            if id.0 >= self.components.len() {
+                self.components.resize(id.0 + 1, None);
+            }
+
+            // Register metadata
+            if self.components[id.0].is_none() {
+                self.components[id.0] = Some(*meta);
+            }
+        }
+    }
+
     pub fn get_id<T: Component>(&self) -> Option<ComponentId> {
         let id = T::get_id();
         if id.0 < self.components.len() && self.components[id.0].is_some() {

@@ -2,7 +2,7 @@ use crate::archetype::{Archetype, ArchetypeId};
 use crate::borrow::{AtomicBorrow, ColumnBorrowChecker};
 use crate::component::{Component, ComponentId, ComponentMask, ComponentRegistry};
 use crate::entity::Entity;
-use crate::world::World;
+use crate::world::{self, World};
 
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -43,8 +43,12 @@ pub trait View<'a>: Sized {
 
     /// Creates a Fetch for a specific Archetype.
     /// Returns None if the archetype is missing required components.
-    fn create_fetch(
-        archetype: &'a mut Archetype,
+    ///
+    /// # Safety
+    /// The Archetype pointer must be valid and point to a live Archetype.
+    /// It will be used in accordance with the borrow rules established by borrow_columns.
+    unsafe fn create_fetch(
+        archetype: *mut Archetype,
         registry: &ComponentRegistry,
         tick: u32,
     ) -> Option<Self::Fetch>;
@@ -196,13 +200,13 @@ impl<'a, T: Component> View<'a> for Mut<'a, T> {
     type Item = Mut<'a, T>;
     type Fetch = WriteFetch<'a, T>;
 
-    fn create_fetch(
-        archetype: &'a mut Archetype,
+    unsafe fn create_fetch(
+        archetype: *mut Archetype,
         registry: &ComponentRegistry,
         tick: u32,
     ) -> Option<Self::Fetch> {
         let id = registry.get_id::<T>()?;
-        let column = archetype.column_mut(&id)?;
+        let column = unsafe { &mut *archetype }.column_mut(&id)?;
 
         // SAFETY: We have exclusive access to the column due to the mutable borrow.
         // Caller must use borrow_columns to first borrow the column mutably.
@@ -228,13 +232,13 @@ impl<'a, T: Component> View<'a> for &'a T {
     type Item = &'a T;
     type Fetch = ReadFetch<T>;
 
-    fn create_fetch(
-        archetype: &'a mut Archetype,
+    unsafe fn create_fetch(
+        archetype: *mut Archetype,
         registry: &ComponentRegistry,
         _tick: u32,
     ) -> Option<Self::Fetch> {
         let id = registry.get_id::<T>()?;
-        let column = archetype.column_mut(&id)?;
+        let column = unsafe { &mut *archetype }.column_mut(&id)?;
 
         let ptr = column.get_ptr(0) as *mut T;
         // SAFETY: We have a shared borrow to the column.
@@ -295,13 +299,13 @@ impl<'a> View<'a> for Entity {
     type Item = Entity;
     type Fetch = EntityFetch<'a>;
 
-    fn create_fetch(
-        archetype: &'a mut Archetype,
+    unsafe fn create_fetch(
+        archetype: *mut Archetype,
         _registry: &ComponentRegistry,
         _tick: u32,
     ) -> Option<Self::Fetch> {
         Some(EntityFetch {
-            entities: archetype.entities(),
+            entities: unsafe { &*archetype }.entities(),
             current: 0,
         })
     }
@@ -523,28 +527,22 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
 
         for &arch_id in &self.cached_archetypes {
             // SAFETY: We iterate distinct archetypes sequentially.
-            // We cast `*mut Archetype` to create two mutable references (`arch`, `arch2`).
-            //
-            // WHY IS THIS SAFE?
-            // 1. `arch` is used for the View (reading/writing component data).
-            // 2. `arch2` is used for the Filter (reading component ticks/data).
-            //
-            // The `borrow_check` above guarantees that the columns requested by View and Filter
-            // do not overlap mutably (e.g. View writes Pos, Filter reads Pos is forbidden).
-            // The `AtomicBorrow` locks inside the columns ensure runtime enforcement.
-            let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
-            let arch2 = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
+            let arch = unsafe { &mut world.archetypes[arch_id] as *mut Archetype };
 
-            let len = arch.len();
+            let len = unsafe { &*arch }.len();
             if len == 0 {
                 continue;
             }
 
             // Create Filter (e.g., checks change ticks)
-            let mut current_skip_filter = F::create_skip_filter(arch2, &world.registry, query_tick);
+            // SAFETY: We know that the columns used by the filter are correctly borrowed
+            let mut current_skip_filter =
+                unsafe { F::create_skip_filter(arch, &world.registry, query_tick) };
 
             // Create Fetch (pointers to data columns)
-            if let Some(mut fetch) = V::create_fetch(arch, &world.registry, world.tick()) {
+            // SAFETY: We know that the columns used by the view are correctly borrowed
+            if let Some(mut fetch) = unsafe { V::create_fetch(arch, &world.registry, world.tick()) }
+            {
                 if let Some(skip_filter) = &mut current_skip_filter {
                     for _ in 0..len {
                         // Check filter first
@@ -561,6 +559,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
                 } else {
                     // Optimized loop without filter checks
                     for _ in 0..len {
+                        // SAFETY: `next()` reads/writes data. We are in bounds.
                         unsafe {
                             func(fetch.next());
                         }
@@ -582,28 +581,42 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         let location = world.entity_location(entity)?;
 
         let arch_id = location.archetype_id();
-        let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
+        let arch = unsafe { &mut world.archetypes[arch_id] as *mut Archetype };
 
         // 2. Check if Entity's Archetype matches Query masks
-        if !self.check_archetype(arch) {
+        if !self.check_archetype(unsafe { &*arch }) {
             return None;
         }
 
         // 3. Local Borrow Check (just for this specific access)
-        let arch2 = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
         let mut borrow_checker = ColumnBorrowChecker::new();
+        let mut filter_borrow_checker = ColumnBorrowChecker::new();
         QD::borrow_columns(&world.registry, &mut borrow_checker);
-        FD::borrow_columns(&world.registry, &mut borrow_checker);
+        FD::borrow_columns(&world.registry, &mut filter_borrow_checker);
+        borrow_checker.overlay(&filter_borrow_checker);
 
-        if !borrow_checker.apply_borrow(arch) {
+        if !borrow_checker.apply_borrow(unsafe { &*arch }) {
             panic!("Query borrow conflict detected");
         }
 
         // 4. Create Fetch pointing to the start of the archetype
-        let mut fetch = V::create_fetch(arch, &world.registry, self.last_query_tick)?;
+        let mut fetch = unsafe { V::create_fetch(arch, &world.registry, self.last_query_tick) }?;
 
         // 5. Retrieve the atomic borrow states so `GetGuard` can release them later
-        let raw_borrows = borrow_checker.get_raw_borrows(arch2);
+        let raw_borrows = borrow_checker.get_raw_borrows(unsafe { &*arch });
+
+        if let Some(mut skip_filter) =
+            unsafe { F::create_skip_filter(arch, &world.registry, self.last_query_tick) }
+        {
+            // Apply filter logic up to the target row
+            skip_filter.skip_rows(location.row());
+            if skip_filter.should_skip() {
+                // Entity is filtered out
+                // Release local borrows before returning
+                borrow_checker.release_borrow(unsafe { &mut *arch });
+                return None;
+            }
+        }
 
         // 6. Get the specific row data
         // SAFETY: `location.row()` comes from `world.entity_index` which is kept in sync with archetypes.
@@ -739,19 +752,19 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
             // We are splitting the archetype pointer to allow disjoint column access
             // between the View (V) and the Filter (F).
             // Aliasing is guaranteed safe by `QueryInner::borrow_check`.
-            let arch = unsafe { &mut *(&mut self.world.archetypes[arch_id] as *mut Archetype) };
-            let arch2 = unsafe { &mut *(&mut self.world.archetypes[arch_id] as *mut Archetype) };
+            let arch = unsafe { &mut self.world.archetypes[arch_id] as *mut Archetype };
 
-            if arch.len() == 0 {
+            if unsafe { &*arch }.len() == 0 {
                 continue;
             }
 
             // Setup state for new archetype
-            self.current_len = arch.len();
+            self.current_len = unsafe { &*arch }.len();
             self.current_row = 0;
-            self.current_fetch = V::create_fetch(arch, &self.world.registry, self.world.tick());
+            self.current_fetch =
+                unsafe { V::create_fetch(arch, &self.world.registry, self.world.tick()) };
             self.current_skip_filter =
-                F::create_skip_filter(arch2, &self.world.registry, self.last_query_tick);
+                unsafe { F::create_skip_filter(arch, &self.world.registry, self.last_query_tick) };
         }
     }
 }
@@ -785,8 +798,8 @@ pub trait Filter {
     type Persistent: FilterData;
     type SkipFilter<'a>: SkipFilter = ();
 
-    fn create_skip_filter<'a>(
-        _archetype: &'a mut Archetype,
+    unsafe fn create_skip_filter<'a>(
+        _archetype: *mut Archetype,
         _registry: &ComponentRegistry,
         _tick: u32,
     ) -> Option<Self::SkipFilter<'a>> {
@@ -822,13 +835,6 @@ impl FilterData for () {
 impl Filter for () {
     type Persistent = ();
     type SkipFilter<'a> = ();
-    fn create_skip_filter<'a>(
-        _: &'a mut Archetype,
-        _: &ComponentRegistry,
-        _: u32,
-    ) -> Option<Self::SkipFilter<'a>> {
-        None
-    }
 }
 
 // With<T>
@@ -848,9 +854,6 @@ pub struct With<T>(PhantomData<T>);
 impl<T: Component> Filter for With<T> {
     type Persistent = WithData<T>;
     type SkipFilter<'a> = ();
-    fn create_skip_filter(_: &mut Archetype, _: &ComponentRegistry, _: u32) -> Option<()> {
-        None
-    }
 }
 
 // Without<T>
@@ -870,9 +873,6 @@ pub struct Without<T>(PhantomData<T>);
 impl<T: Component> Filter for Without<T> {
     type Persistent = WithoutData<T>;
     type SkipFilter<'a> = ();
-    fn create_skip_filter(_: &mut Archetype, _: &ComponentRegistry, _: u32) -> Option<()> {
-        None
-    }
 }
 
 // AND<T, U>: Combines two filters with AND logic
@@ -882,18 +882,16 @@ impl<T: Filter, U: Filter> Filter for And<T, U> {
     type Persistent = And<T::Persistent, U::Persistent>;
 
     #[inline(always)]
-    fn create_skip_filter<'a>(
-        archetype: &'a mut Archetype,
+    unsafe fn create_skip_filter<'a>(
+        archetype: *mut Archetype,
         registry: &ComponentRegistry,
         tick: u32,
     ) -> Option<Self::SkipFilter<'a>> {
         // safety: The filters SHOULD check that they obey borrow rules. using
         // AtomicBorrow.
 
-        let archetype_2 = unsafe { &mut *(&mut *archetype as *mut Archetype) };
-
         let t_filter = T::create_skip_filter(archetype, registry, tick)?;
-        let u_filter = U::create_skip_filter(archetype_2, registry, tick)?;
+        let u_filter = U::create_skip_filter(archetype, registry, tick)?;
         Some(AndSkip(t_filter, u_filter))
     }
 }
@@ -959,13 +957,13 @@ impl<T: Component> Filter for Changed<T> {
     type Persistent = ChangedData<T>;
     type SkipFilter<'a> = ChangedSkipFilter<T>;
 
-    fn create_skip_filter<'a>(
-        archetype: &'a mut Archetype,
+    unsafe fn create_skip_filter<'a>(
+        archetype: *mut Archetype,
         registry: &ComponentRegistry,
         tick: u32,
     ) -> Option<Self::SkipFilter<'a>> {
         let id = registry.get_id::<T>()?;
-        let column = archetype.column_mut(&id)?;
+        let column = unsafe { &mut *archetype }.column_mut(&id)?;
         let ptr = column.get_ticks_ptr();
         Some(ChangedSkipFilter {
             change_tick: tick,
@@ -1001,9 +999,8 @@ macro_rules! impl_query_tuples {
         impl<'a, $($name: View<'a>),*> View<'a> for ($($name,)*) {
             type Item = ($($name::Item,)*);
             type Fetch = ($($name::Fetch,)*);
-            fn create_fetch(arch: &'a mut Archetype, reg: &ComponentRegistry, tick: u32) -> Option<Self::Fetch> {
-                let ptr = arch as *mut Archetype;
-                Some(( $( $name::create_fetch(unsafe { &mut *ptr }, reg, tick)?, )* ))
+            unsafe fn create_fetch(arch: *mut Archetype, reg: &ComponentRegistry, tick: u32) -> Option<Self::Fetch> {
+                unsafe { Some(( $( $name::create_fetch(arch, reg, tick)?, )* )) }
             }
 
             fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker) {
@@ -1042,9 +1039,8 @@ macro_rules! impl_query_tuples {
             type Persistent = ($($name::Persistent,)*);
             type SkipFilter<'a> = ($(Option<$name::SkipFilter<'a>>,)*);
 
-            fn create_skip_filter<'a>(arch: &'a mut Archetype, reg: &ComponentRegistry, tick: u32) -> Option<Self::SkipFilter<'a>> {
-                 let ptr = arch as *mut Archetype;
-                 Some(( $( $name::create_skip_filter(unsafe { &mut *ptr }, reg, tick), )* ))
+            unsafe fn create_skip_filter<'a>(arch: *mut Archetype, reg: &ComponentRegistry, tick: u32) -> Option<Self::SkipFilter<'a>> {
+                 Some(( $( $name::create_skip_filter(arch, reg, tick), )* ))
             }
         }
 

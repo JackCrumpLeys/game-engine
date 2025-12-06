@@ -94,8 +94,10 @@ impl<T: FromWorldThread> WorldThreadLocalStore<T> {
     /// This requires `&mut self`, ensuring no threads are currently running
     /// (e.g., at a sync point in the schedule).
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.slots
-            .iter_mut()
-            .filter_map(|slot| slot.inner.get_mut().as_mut())
+        self.slots.iter_mut().filter_map(|padded_slot| {
+            // SAFETY: We have &mut self, so no other threads can be accessing these slots.
+            let slot = unsafe { &mut *padded_slot.inner.get() };
+            slot.as_mut()
+        })
     }
 }

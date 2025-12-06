@@ -1,5 +1,5 @@
 use crate::archetype::Archetype;
-use crate::component::{Component, ComponentId, ComponentMask, ComponentRegistry};
+use crate::component::{Component, ComponentId, ComponentMask, ComponentMeta, ComponentRegistry};
 use crate::storage::TypeErasedSequence;
 use std::any::type_name;
 
@@ -8,7 +8,10 @@ pub trait Bundle {
 
     /// Returns the list of component IDs in this bundle.
     /// Registers them if not present.
-    fn component_ids(registry: &mut ComponentRegistry) -> Vec<ComponentId>;
+    fn component_ids() -> Vec<ComponentId>;
+
+    /// Returns the metadata for each component in this bundle.
+    fn component_metas() -> Vec<ComponentMeta>;
 
     /// Writes the bundle's data into the given TypeErasedSequences.
     /// # Safety
@@ -44,22 +47,28 @@ macro_rules! impl_bundle {
             }
 
             #[inline(always)]
-            fn component_ids(registry: &mut ComponentRegistry) -> Vec<ComponentId> {
+            fn component_ids() -> Vec<ComponentId> {
                 // make sure no overlap
                 #[cfg(debug_assertions)]
                 {
                     let mut mask = ComponentMask::new();
                     $(
-                        let id = registry.register::<$name>();
+                        let id = $name::get_id();
                         debug_assert!(!mask.has(id.0), "Duplicate component in bundle: {}", type_name::<$name>());
                         mask.set(id.0);
                     )*
                 }
                 vec![$(
-                    registry.register::<$name>(),
+                    $name::get_id(),
                 )*]
             }
 
+            #[inline(always)]
+            fn component_metas() -> Vec<ComponentMeta> {
+                vec![$(
+                    $name::meta(),
+                )*]
+            }
 
             #[inline(always)]
             unsafe fn put(
@@ -132,7 +141,10 @@ macro_rules! impl_bundle {
 
 // Implement for Unit
 impl Bundle for () {
-    fn component_ids(_r: &mut ComponentRegistry) -> Vec<ComponentId> {
+    fn component_ids() -> Vec<ComponentId> {
+        vec![]
+    }
+    fn component_metas() -> Vec<ComponentMeta> {
         vec![]
     }
     unsafe fn put(self, columns: &mut [&mut TypeErasedSequence], ids: &[ComponentId]) {}

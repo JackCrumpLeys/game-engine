@@ -2,13 +2,13 @@ use smallvec::SmallVec;
 
 use crate::archetype::{Archetype, ArchetypeId};
 use crate::bundle::{Bundle, ManyRowBundle};
-use crate::component::{ComponentId, ComponentMask, ComponentRegistry};
+use crate::component::{ComponentId, ComponentMask, ComponentMeta, ComponentRegistry};
 use crate::entity::{Entities, Entity};
 use crate::query::{Filter, QueryInner, QueryToken};
 use crate::resource::Resources;
 use crate::storage::TypeErasedSequence;
 use crate::thread_entity_allocator::LocalThreadEntityAllocator;
-use crate::threading::WorldThreadLocalStore;
+use crate::threading::{FromWorldThread, WorldThreadLocalStore};
 use std::collections::HashMap;
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::{Arc, Mutex, RwLock};
@@ -40,17 +40,18 @@ pub struct World {
     archetype_index: HashMap<ComponentMask, ArchetypeId>,
     resources: Resources,
     current_tick: u32,
-    insert_buffer: EntityInsertBuffer,
 }
 
 struct ThreadLocalWorldData {
     entity_allocators: WorldThreadLocalStore<LocalThreadEntityAllocator>,
+    insert_buffers: WorldThreadLocalStore<EntityInsertBuffer>,
 }
 
 impl ThreadLocalWorldData {
     fn new() -> Self {
         Self {
             entity_allocators: WorldThreadLocalStore::new(),
+            insert_buffers: WorldThreadLocalStore::new(),
         }
     }
 }
@@ -65,11 +66,18 @@ struct EntityInsertBuffer {
     masks: Vec<ComponentMask>,
     /// Cache sorted component ids per archetype
     comp_ids: Vec<Vec<ComponentId>>,
+    comp_metas: Vec<Vec<ComponentMeta>>,
     /// The columns for each archetype's buffered entities
     /// It is in the order of:
     ///  * ComponentMask
     ///  * ComponentId
     bundle_cols: Vec<Vec<TypeErasedSequence>>,
+}
+
+impl FromWorldThread for EntityInsertBuffer {
+    fn new_thread_local(_thread_id: usize, _world: &World) -> Self {
+        Self::default()
+    }
 }
 
 impl EntityInsertBuffer {
@@ -95,37 +103,31 @@ impl EntityInsertBuffer {
                 self.ids.insert(index, Vec::new());
                 self.bundle_cols.insert(index, Vec::new());
                 self.comp_ids.insert(index, Vec::new());
+                self.comp_metas.insert(index, Vec::new());
                 index
             }
         }
     }
 
-    fn insert_bundle<B: Bundle>(
-        &mut self,
-        entity: Entity,
-        bundle: B,
-        component_registry: &mut ComponentRegistry,
-    ) {
+    fn insert_bundle<B: Bundle>(&mut self, entity: Entity, bundle: B) {
         let mask = B::mask();
 
         let arch_index = self.get_or_create_archetype_buffer(mask);
-        let bundle_cols = &mut self.bundle_cols[arch_index];
 
-        let mut component_ids = &self.comp_ids[arch_index];
+        let bundle_cols = &mut self.bundle_cols[arch_index];
+        let component_ids = &mut self.comp_ids[arch_index];
 
         if component_ids.is_empty() {
-            self.comp_ids[arch_index] = B::component_ids(component_registry);
-            self.comp_ids[arch_index].sort_unstable();
+            let mut meta: Vec<(ComponentId, ComponentMeta)> = B::component_ids()
+                .into_iter()
+                .zip(B::component_metas().into_iter())
+                .collect();
+            meta.sort_unstable_by_key(|(id, _)| *id);
 
-            component_ids = &self.comp_ids[arch_index];
-        }
-
-        if bundle_cols.is_empty() {
-            for &comp_id in component_ids {
-                let meta = component_registry
-                    .get_meta(comp_id)
-                    .expect("ComponentId not found in registry");
-                bundle_cols.push(TypeErasedSequence::new(meta));
+            for (id, meta) in meta {
+                component_ids.push(id);
+                bundle_cols.push(TypeErasedSequence::new(&meta));
+                self.comp_metas[arch_index].push(meta);
             }
         }
 
@@ -207,7 +209,6 @@ impl World {
             archetype_index: HashMap::new(),
             resources: Resources::new(),
             current_tick: 1, // 0 can be special
-            insert_buffer: EntityInsertBuffer::default(),
         }
     }
 
@@ -234,18 +235,18 @@ impl World {
 
     /// Spawn deferred: Spawns an entity with the given bundle, deferring the actual insertion
     /// until later.
-    pub fn spawn_deferred<B: Bundle>(&mut self, bundle: B) -> Entity {
+    pub fn spawn_deferred<B: Bundle>(&self, bundle: B) -> Entity {
         let ent = self.entity_allocator().alloc(self.current_tick);
 
-        self.insert_buffer
-            .insert_bundle(ent, bundle, &mut self.registry);
+        self.spawn_deferred_with_id(ent, bundle);
 
         ent
     }
 
     pub fn spawn_with_id<B: Bundle>(&mut self, entity: Entity, bundle: B) {
-        // Register components ensuring metadata exists
-        B::component_ids(&mut self.registry);
+        let mut real_order = B::component_ids();
+        let metas = B::component_metas();
+        self.registry.bulk_manual_register(&real_order, &metas);
 
         let mask = B::mask();
         let arch_id = self.get_or_create_archetype(mask);
@@ -289,10 +290,14 @@ impl World {
     where
         BM: ManyRowBundle<Item = B>,
     {
-        let b_order = B::component_ids(&mut self.registry);
+        let b_order = B::component_ids();
 
         let mask = B::mask();
-        let real_order = mask.to_ids(); // Sorted
+        let mut real_order = B::component_ids();
+        let metas = B::component_metas();
+        self.registry.bulk_manual_register(&real_order, &metas);
+        real_order.sort_unstable();
+
         let arch_id = self.get_or_create_archetype(mask);
         let count = bundles.len();
 
@@ -364,57 +369,67 @@ impl World {
     }
 
     pub fn flush(&mut self) {
-        if self.insert_buffer.is_empty() {
-            return;
-        }
+        let buffers = Vec::from_iter(
+            self.thread_local
+                .insert_buffers
+                .iter_mut()
+                .filter(|b| !b.is_empty())
+                .map(|b| std::mem::take(b)),
+        );
+        for mut buffer in buffers {
+            let count = buffer.len();
 
-        let mut buffer = std::mem::take(&mut self.insert_buffer);
-        let count = buffer.len();
+            for i in 0..count {
+                let comp_ids = &mut buffer.comp_ids[i];
+                let metas = &buffer.comp_metas[i];
+                self.registry.bulk_manual_register(comp_ids, metas);
 
-        for i in 0..count {
-            let mask = buffer.masks[i];
-            let arch_id = self.get_or_create_archetype(mask);
-            let entities = &buffer.ids[i];
-            let comp_ids = mask.to_ids();
-            let mut src_cols = std::mem::take(&mut buffer.bundle_cols[i]);
+                let mask = buffer.masks[i];
+                let arch_id = self.get_or_create_archetype(mask);
+                let entities = &buffer.ids[i];
 
-            let arch = &mut self.archetypes[arch_id];
-            let start_row = arch.len();
+                let mut src_cols = std::mem::take(&mut buffer.bundle_cols[i]);
 
-            for (src_seq, &comp_id) in src_cols.drain(..).zip(comp_ids.iter()) {
-                let dest_col = arch
-                    .column_mut(&comp_id)
-                    .expect("Archetype created from mask should have matching columns");
+                let arch = &mut self.archetypes[arch_id];
+                let start_row = arch.len();
 
-                dest_col.set_tick(self.current_tick);
-                dest_col.append(src_seq);
-            }
+                for (src_seq, &comp_id) in src_cols.drain(..).zip(comp_ids.iter()) {
+                    let dest_col = arch
+                        .column_mut(&comp_id)
+                        .expect("Archetype created from mask should have matching columns");
 
-            let mut max_idx = 0;
-            for &e in entities {
-                max_idx = max_idx.max(e.index() as usize);
-            }
-            if max_idx >= self.entity_index.len() {
-                self.entity_index.resize(max_idx + 1, None);
-            }
+                    dest_col.set_tick(self.current_tick);
+                    dest_col.append(src_seq);
+                }
 
-            let mut entities_guard = self.entities.write().unwrap();
-            arch.push_entities(entities);
+                let mut max_idx = 0;
+                for &e in entities {
+                    max_idx = max_idx.max(e.index() as usize);
+                }
+                if max_idx >= self.entity_index.len() {
+                    self.entity_index.resize(max_idx + 1, None);
+                }
 
-            for (i, &entity) in entities.iter().enumerate() {
-                let row = start_row + i;
-                self.entity_index[entity.index() as usize] = Some(EntityLocation {
-                    archetype_id: arch_id,
-                    row,
-                });
-                entities_guard.initialize(entity);
+                let mut entities_guard = self.entities.write().unwrap();
+                arch.push_entities(entities);
+
+                for (i, &entity) in entities.iter().enumerate() {
+                    let row = start_row + i;
+                    self.entity_index[entity.index() as usize] = Some(EntityLocation {
+                        archetype_id: arch_id,
+                        row,
+                    });
+                    entities_guard.initialize(entity);
+                }
             }
         }
     }
     /// Spawns an entity with the given bundle, deferring the actual insertion until later.
-    pub fn spawn_deferred_with_id<B: Bundle>(&mut self, bundle: B, id: Entity) {
-        self.insert_buffer
-            .insert_bundle(id, bundle, &mut self.registry);
+    pub fn spawn_deferred_with_id<B: Bundle>(&self, id: Entity, bundle: B) {
+        self.thread_local
+            .insert_buffers
+            .get(self)
+            .insert_bundle(id, bundle);
     }
 
     pub fn query<Q: QueryToken, F: Filter>(&mut self) -> QueryInner<Q::Persistent, F::Persistent> {
