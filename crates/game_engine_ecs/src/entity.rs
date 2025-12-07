@@ -1,4 +1,4 @@
-use std::{fmt, iter::repeat_n};
+use std::fmt;
 
 /// A unique identifier for an object in the World.
 /// Consists of a 32-bit index and a 32-bit generation.
@@ -132,10 +132,10 @@ impl Entities {
             let start_index = self.generations.len() as u32;
 
             // Extend the generations vector with 0s for the new entities
-            self.generations.extend(std::iter::repeat(0).take(needed));
+            self.generations.extend(std::iter::repeat_n(0, needed));
             // Extend the is_initialized vector with false for the new entities
             self.is_initialized
-                .extend(std::iter::repeat(false).take(needed));
+                .extend(std::iter::repeat_n(false, needed));
 
             // Generate the new Entity IDs
             for i in 0..needed {
@@ -184,7 +184,7 @@ impl Entities {
 }
 
 #[cfg(test)]
-mod tests {
+mod entity_tests {
     use super::*;
 
     #[test]
@@ -212,5 +212,128 @@ mod tests {
         // but the generation 0 != 1, so it is invalid.
         assert!(!entities.is_alive(e1));
         assert!(entities.is_alive(e3));
+    }
+    
+
+    #[test]
+    fn test_entity_bit_masking() {
+        let index = 12345;
+        let generation = 54321;
+        let entity = Entity::new(index, generation);
+
+        assert_eq!(entity.index(), index);
+        assert_eq!(entity.generation(), generation);
+
+        // Ensure the upper/lower bits don't bleed into each other
+        let max_idx = u32::MAX;
+        let e_max = Entity::new(max_idx, 0);
+        assert_eq!(e_max.index(), u32::MAX);
+        assert_eq!(e_max.generation(), 0);
+    }
+
+    #[test]
+    fn test_alloc_free_recycle() {
+        let mut entities = Entities::new();
+
+        // 1. Allocate A
+        let e1 = entities.alloc();
+        assert_eq!(e1.index(), 0);
+        assert_eq!(e1.generation(), 0);
+
+        // Initialize it (simulate world spawn)
+        entities.initialize(e1);
+        assert!(entities.is_alive(e1));
+        assert!(entities.is_initialized(e1));
+
+        // 2. Free A
+        assert!(entities.free(e1));
+
+        // e1 should be dead
+        assert!(!entities.is_alive(e1));
+        // Double free should fail
+        assert!(!entities.free(e1));
+
+        // 3. Allocate B (Should reuse A's index, but Gen 1)
+        let e2 = entities.alloc();
+        assert_eq!(e2.index(), 0); // Reused
+        assert_eq!(e2.generation(), 1); // Incremented
+
+        // 4. e1 should definitely not be considered e2
+        assert!(!entities.is_alive(e1));
+        assert!(entities.is_alive(e2));
+    }
+
+    #[test]
+    fn test_alloc_batch_contiguous() {
+        let mut entities = Entities::new();
+
+        // Request 100 entities
+        let batch = entities.alloc_batch(100);
+
+        assert_eq!(batch.len(), 100);
+        assert_eq!(entities.len(), 100);
+
+        // Since it's fresh, they should be sequential 0..100
+        for (i, e) in batch.iter().enumerate() {
+            assert_eq!(e.index() as usize, i);
+            assert_eq!(e.generation(), 0);
+        }
+    }
+
+    #[test]
+    fn test_alloc_batch_fragmented() {
+        let mut entities = Entities::new();
+
+        // Alloc 3
+        let e0 = entities.alloc();
+        let e1 = entities.alloc();
+        let e2 = entities.alloc();
+
+        // Free 1 and 2 (put into reuse queue)
+        entities.free(e1);
+        entities.free(e2);
+
+        // We expect the reuse queue to look like [1, 2] (or [2, 1] depending on impl)
+        // plus we need 2 more new ones.
+
+        let batch = entities.alloc_batch(4);
+
+        // It should have reused index 1 and 2
+        let reused_count = batch
+            .iter()
+            .filter(|e| e.index() == 1 || e.index() == 2)
+            .count();
+        assert_eq!(reused_count, 2);
+
+        // Generations for 1 and 2 should be 1
+        for e in &batch {
+            if e.index() == 1 || e.index() == 2 {
+                assert_eq!(e.generation(), 1);
+            } else {
+                // The new ones (index 3 and 4)
+                assert_eq!(e.generation(), 0);
+            }
+        }
+
+        // e0 (index 0) was never touched
+        assert!(entities.is_alive(e0));
+    }
+
+    #[test]
+    fn test_is_initialized_check() {
+        let mut entities = Entities::new();
+        let e = entities.alloc();
+
+        // Alive (reserved) but not initialized (no data)
+        assert!(entities.is_alive(e));
+        assert!(!entities.is_initialized(e));
+
+        entities.initialize(e);
+        assert!(entities.is_initialized(e));
+
+        entities.free(e);
+
+        let e2 = entities.alloc();
+        assert!(!entities.is_initialized(e2)); // Reset logic works
     }
 }

@@ -224,7 +224,6 @@ fn bench_allocation(c: &mut Criterion) {
         b.iter_batched(
             World::new,
             |mut world| {
-                let mut world = &mut World::new();
                 for i in 0..ENTITY_COUNT {
                     let pos = Position {
                         x: i as f32,

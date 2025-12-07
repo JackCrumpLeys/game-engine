@@ -1,7 +1,6 @@
 use std::alloc::{self, Layout};
 use std::any::type_name;
-use std::mem;
-use std::ptr::{self, NonNull, drop_in_place};
+use std::ptr::{self, NonNull};
 
 use crate::borrow::AtomicBorrow;
 use crate::component::ComponentMeta;
@@ -45,7 +44,7 @@ impl TypeErasedSequence {
 
     /// Makes a dummy TypeErasedSequence with zero length and capacity.
     /// useful for
-    fn dummy() -> Self {
+    pub fn dummy() -> Self {
         TypeErasedSequence {
             ptr: NonNull::dangling(),
             len: 0,
@@ -63,7 +62,7 @@ impl TypeErasedSequence {
     pub unsafe fn push<T>(&mut self, value: T) {
         #[cfg(debug_assertions)]
         {
-            if self.name == "" {
+            if self.name.is_empty() {
                 self.name = type_name::<T>();
             }
         }
@@ -211,7 +210,7 @@ impl TypeErasedSequence {
         }
 
         let old_capacity = self.capacity;
-        let mut new_capacity = (self.capacity + additional).max(4).next_power_of_two();
+        let new_capacity = (self.capacity + additional).max(4).next_power_of_two();
 
         let new_size = new_capacity * self.layout.size();
         let new_layout = Layout::from_size_align(new_size, self.layout.align()).unwrap();
@@ -358,10 +357,6 @@ impl Column {
         self.inner.reserve(additional);
         self.mutated_ticks.reserve(additional);
     }
-
-    fn grow(&mut self) {
-        self.inner.grow();
-    }
 }
 
 // Crucial: The Drop implementation for the container itself
@@ -397,8 +392,13 @@ impl Drop for Column {
 }
 
 #[cfg(test)]
-mod tests {
+mod storage_tests {
+    use crate::prelude::ComponentId;
+
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     #[test]
     fn test_column_push_and_get() {
         let mut col = Column::new::<u32>();
@@ -462,5 +462,433 @@ mod tests {
 
         assert_eq!(col.len(), 2);
         assert_eq!(col.mutated_ticks[..col.len()], vec![1, 3]);
+    }
+
+    // ============================================================================
+    // TEST HELPERS
+    // ============================================================================
+
+    /// A helper that tracks when it is dropped.
+    /// Useful for ensuring TypeErasedSequence cleans up correctly.
+    #[derive(Debug)]
+    struct DropTracker {
+        id: usize,
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl Drop for DropTracker {
+        fn drop(&mut self) {
+            self.counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl_component!(DropTracker);
+
+    // ============================================================================
+    // BASIC FUNCTIONALITY
+    // ============================================================================
+
+    #[test]
+    fn test_push_and_get_primitive() {
+        let mut col = Column::new::<u32>();
+
+        unsafe {
+            col.push(10u32);
+            col.push(20u32);
+            col.push(30u32);
+        }
+
+        assert_eq!(col.len(), 3);
+        assert!(col.inner().capacity >= 3);
+
+        unsafe {
+            let p0 = col.get_ptr(0) as *const u32;
+            let p1 = col.get_ptr(1) as *const u32;
+            let p2 = col.get_ptr(2) as *const u32;
+
+            assert_eq!(*p0, 10);
+            assert_eq!(*p1, 20);
+            assert_eq!(*p2, 30);
+        }
+    }
+
+    #[test]
+    fn test_swap_remove_logic() {
+        let mut col = Column::new::<u32>();
+
+        unsafe {
+            col.push(0u32); // idx 0
+            col.push(1u32); // idx 1
+            col.push(2u32); // idx 2
+            col.push(3u32); // idx 3
+        }
+
+        // Remove from middle (idx 1).
+        // Expected: Last element (3) moves to idx 1.
+        col.swap_remove(1);
+
+        assert_eq!(col.len(), 3);
+
+        unsafe {
+            assert_eq!(*(col.get_ptr(0) as *const u32), 0);
+            assert_eq!(*(col.get_ptr(1) as *const u32), 3); // Moved
+            assert_eq!(*(col.get_ptr(2) as *const u32), 2);
+        }
+
+        // Remove last element (now idx 2, val 2).
+        // Expected: Just a pop.
+        col.swap_remove(2);
+        assert_eq!(col.len(), 2);
+        unsafe {
+            assert_eq!(*(col.get_ptr(0) as *const u32), 0);
+            assert_eq!(*(col.get_ptr(1) as *const u32), 3);
+        }
+    }
+
+    // ============================================================================
+    // MEMORY SAFETY & LIFECYCLES
+    // ============================================================================
+
+    #[test]
+    fn test_drop_safety_on_column_drop() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+
+        {
+            let mut col = Column::new::<DropTracker>();
+            for i in 0..10 {
+                unsafe {
+                    col.push(DropTracker {
+                        id: i,
+                        counter: drop_count.clone(),
+                    });
+                }
+            }
+            assert_eq!(col.len(), 10);
+            assert_eq!(drop_count.load(Ordering::Relaxed), 0);
+            // col drops here
+        }
+
+        // Ensure all 10 items were dropped exactly once
+        assert_eq!(drop_count.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn test_drop_safety_on_swap_remove() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let mut col = Column::new::<DropTracker>();
+
+        unsafe {
+            col.push(DropTracker {
+                id: 0,
+                counter: drop_count.clone(),
+            });
+            col.push(DropTracker {
+                id: 1,
+                counter: drop_count.clone(),
+            });
+            col.push(DropTracker {
+                id: 2,
+                counter: drop_count.clone(),
+            });
+        }
+
+        // Remove index 0. It should drop immediately.
+        col.swap_remove(0);
+
+        assert_eq!(drop_count.load(Ordering::Relaxed), 1);
+        assert_eq!(col.len(), 2);
+
+        // Verify the remaining items are the correct ones (id 2 should be at 0 now)
+        unsafe {
+            let p0 = col.get_ptr(0) as *const DropTracker;
+            assert_eq!((*p0).id, 2);
+        }
+    }
+
+    #[test]
+    fn test_growth_integrity() {
+        // Push enough items to force multiple reallocations
+        let mut col = Column::new::<usize>();
+        let count = 10_000;
+
+        for i in 0..count {
+            unsafe {
+                col.push(i);
+            }
+        }
+
+        assert_eq!(col.len(), count);
+
+        // Verify data integrity after potential moves
+        for i in 0..count {
+            unsafe {
+                let val = *(col.get_ptr(i) as *const usize);
+                assert_eq!(val, i);
+            }
+        }
+    }
+
+    // ============================================================================
+    // ALIGNMENT & ZST
+    // ============================================================================
+
+    #[test]
+    fn test_high_alignment() {
+        // A struct with 128-byte alignment (e.g., similar to SIMD)
+        #[repr(align(128))]
+        #[derive(Debug, PartialEq)]
+        struct BigAlign(u8);
+
+        impl crate::prelude::Component for BigAlign {
+            fn get_id() -> ComponentId {
+                ComponentId(0) // Mock ID
+            }
+        }
+
+        let mut col = Column::new::<BigAlign>();
+
+        unsafe {
+            col.push(BigAlign(1));
+            col.push(BigAlign(2));
+            col.push(BigAlign(3));
+        }
+
+        // Force a resize
+        for i in 4..100 {
+            unsafe {
+                col.push(BigAlign(i as u8));
+            }
+        }
+
+        // Check alignment of pointers
+        for i in 0..col.len() {
+            let ptr = col.get_ptr(i) as usize;
+            assert_eq!(ptr % 128, 0, "Index {i} is misaligned");
+        }
+    }
+
+    #[test]
+    fn test_zero_sized_types() {
+        #[derive(Debug)]
+        struct Marker;
+
+        impl crate::prelude::Component for Marker {
+            fn get_id() -> crate::prelude::ComponentId {
+                ComponentId(1)
+            }
+        }
+
+        let mut col = Column::new::<Marker>();
+
+        unsafe {
+            for _ in 0..100 {
+                col.push(Marker);
+            }
+        }
+
+        assert_eq!(col.len(), 100);
+        // Capacity logic for ZST varies, but usually is usize::MAX
+        // We just ensure accessing it doesn't crash
+
+        let _ = col.get_ptr(50);
+        let _ = col.get_ptr(99);
+
+        // Ensure removal works
+        col.swap_remove(0);
+        assert_eq!(col.len(), 99);
+    }
+
+    // ============================================================================
+    // TypeErasedSequence TESTS (Raw Memory Logic)
+    // ============================================================================
+
+    #[test]
+    fn test_sequence_push_and_get() {
+        // We use the Meta from u32 to create the sequence
+        let meta = u32::meta();
+        let mut seq = TypeErasedSequence::new(&meta);
+
+        unsafe {
+            seq.push(10u32);
+            seq.push(20u32);
+            seq.push(30u32);
+        }
+
+        assert_eq!(seq.len(), 3);
+        assert!(seq.capacity >= 3);
+
+        unsafe {
+            let p0 = seq.get_ptr(0) as *const u32;
+            let p1 = seq.get_ptr(1) as *const u32;
+            let p2 = seq.get_ptr(2) as *const u32;
+
+            assert_eq!(*p0, 10);
+            assert_eq!(*p1, 20);
+            assert_eq!(*p2, 30);
+        }
+    }
+
+    #[test]
+    fn test_sequence_swap_remove() {
+        let meta = u32::meta();
+        let mut seq = TypeErasedSequence::new(&meta);
+
+        unsafe {
+            seq.push(0u32); // idx 0
+            seq.push(1u32); // idx 1
+            seq.push(2u32); // idx 2
+            seq.push(3u32); // idx 3
+        }
+
+        // Remove from middle (idx 1). Last element (3) moves to idx 1.
+        seq.swap_remove(1);
+
+        assert_eq!(seq.len(), 3);
+        unsafe {
+            assert_eq!(*(seq.get_ptr(0) as *const u32), 0);
+            assert_eq!(*(seq.get_ptr(1) as *const u32), 3); // Moved here
+            assert_eq!(*(seq.get_ptr(2) as *const u32), 2);
+        }
+
+        // Remove last element (now idx 2, val 2).
+        seq.swap_remove(2);
+        assert_eq!(seq.len(), 2);
+    }
+
+    #[test]
+    fn test_sequence_drop_safety() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let meta = DropTracker::meta();
+
+        {
+            let mut seq = TypeErasedSequence::new(&meta);
+            for i in 0..10 {
+                unsafe {
+                    seq.push(DropTracker {
+                        id: i,
+                        counter: drop_count.clone(),
+                    });
+                }
+            }
+            assert_eq!(seq.len(), 10);
+            assert_eq!(drop_count.load(Ordering::Relaxed), 0);
+            // seq drops here
+        }
+
+        // Ensure all 10 items were dropped exactly once via the internal drop_fn
+        assert_eq!(drop_count.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn test_sequence_growth_integrity() {
+        let meta = usize::meta();
+        let mut seq = TypeErasedSequence::new(&meta);
+        let count = 10_000;
+
+        for i in 0..count {
+            unsafe {
+                seq.push(i);
+            }
+        }
+
+        assert_eq!(seq.len(), count);
+
+        // Verify data integrity after multiple reallocations
+        for i in 0..count {
+            unsafe {
+                let val = *(seq.get_ptr(i) as *const usize);
+                assert_eq!(val, i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_sequence_append_ownership() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let meta = DropTracker::meta();
+
+        let mut dest = TypeErasedSequence::new(&meta);
+        unsafe {
+            dest.push(DropTracker {
+                id: 999,
+                counter: drop_count.clone(),
+            });
+        }
+
+        let mut src = TypeErasedSequence::new(&meta);
+        unsafe {
+            src.push(DropTracker {
+                id: 1,
+                counter: drop_count.clone(),
+            });
+            src.push(DropTracker {
+                id: 2,
+                counter: drop_count.clone(),
+            });
+        }
+
+        // The critical test: append consumes src.
+        // Src elements should NOT drop. They should move to Dest.
+        dest.append(src);
+
+        assert_eq!(drop_count.load(Ordering::Relaxed), 0);
+        assert_eq!(dest.len(), 3);
+
+        unsafe {
+            let p1 = (*(dest.get_ptr(1) as *const DropTracker)).id;
+            assert_eq!(p1, 1);
+        }
+
+        // Now drop dest, all 3 should drop
+        drop(dest);
+        assert_eq!(drop_count.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_sequence_zst() {
+        #[derive(Debug)]
+        struct Marker;
+        impl_component!(Marker);
+
+        let meta = Marker::meta();
+        let mut seq = TypeErasedSequence::new(&meta);
+
+        unsafe {
+            for _ in 0..100 {
+                seq.push(Marker);
+            }
+        }
+
+        assert_eq!(seq.len(), 100);
+        // Ensure swapping and getting pointers doesn't panic or segfault
+        seq.swap_remove(0);
+        let _ = seq.get_ptr(50);
+        assert_eq!(seq.len(), 99);
+    }
+
+    #[test]
+    fn test_sequence_high_alignment() {
+        #[repr(align(128))]
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        struct BigAlign(u8);
+        impl_component!(BigAlign);
+
+        let meta = BigAlign::meta();
+        let mut seq = TypeErasedSequence::new(&meta);
+
+        unsafe {
+            seq.push(BigAlign(1));
+            // Force resize
+            for i in 0..100 {
+                seq.push(BigAlign(i as u8));
+            }
+        }
+
+        // Verify alignment
+        for i in 0..seq.len() {
+            let ptr = seq.get_ptr(i) as usize;
+            assert_eq!(ptr % 128, 0, "Index {i} is misaligned");
+        }
     }
 }

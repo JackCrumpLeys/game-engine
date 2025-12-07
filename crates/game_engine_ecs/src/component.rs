@@ -1,9 +1,6 @@
 use std::alloc::Layout;
-use std::any::TypeId;
-use std::collections::HashMap;
 use std::fmt::{self, Debug};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const MAX_COMPONENTS: usize = 64;
 
@@ -73,7 +70,7 @@ impl ComponentMask {
     #[inline]
     pub fn set(&mut self, index: usize) {
         if index >= Self::CAPACITY {
-            panic!("Index {} out of bounds", index);
+            panic!("Index {index} out of bounds");
         }
         self.unsafe_set(index);
     }
@@ -116,10 +113,13 @@ impl ComponentMask {
     }
 
     #[inline]
-    pub fn union(&mut self, other: &Self) {
+    // Returns true if changed false if no change
+    pub fn union(&mut self, other: &Self) -> bool {
+        let changed = self != other;
         for i in 0..Self::WORD_COUNT {
             self.bits[i] |= other.bits[i];
         }
+        changed
     }
 
     #[inline]
@@ -159,8 +159,8 @@ static NEXT_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 // Global allocator for component IDs
 pub fn allocate_component_id<T: 'static>() -> ComponentId {
     let id = NEXT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let comp_id = ComponentId(id);
-    comp_id
+    
+    ComponentId(id)
 }
 
 pub trait Component: 'static + Send + Sync + Sized + Debug {
@@ -168,9 +168,9 @@ pub trait Component: 'static + Send + Sync + Sized + Debug {
         let name = std::any::type_name::<Self>();
         let layout = std::alloc::Layout::new::<Self>();
 
-        unsafe fn drop_shim<T>(ptr: *mut u8) {
+        unsafe fn drop_shim<T>(ptr: *mut u8) { unsafe {
             std::ptr::drop_in_place(ptr as *mut T);
-        }
+        }}
 
         ComponentMeta {
             name,
@@ -227,7 +227,7 @@ impl ComponentRegistry {
         let id = T::get_id();
 
         if id.0 >= MAX_COMPONENTS {
-            panic!("Exceeded maximum number of components: {}", MAX_COMPONENTS);
+            panic!("Exceeded maximum number of components: {MAX_COMPONENTS}");
         }
 
         // Ensure vector is large enough for this ID
@@ -246,7 +246,7 @@ impl ComponentRegistry {
     pub fn bulk_manual_register(&mut self, ids: &[ComponentId], metas: &[ComponentMeta]) {
         for (meta, id) in metas.iter().zip(ids.iter()) {
             if id.0 >= MAX_COMPONENTS {
-                panic!("Exceeded maximum number of components: {}", MAX_COMPONENTS);
+                panic!("Exceeded maximum number of components: {MAX_COMPONENTS}");
             }
 
             // Ensure vector is large enough for this ID
@@ -281,7 +281,7 @@ impl ComponentRegistry {
 
 #[cfg(test)]
 mod tests {
-    use game_engine_derive::Component;
+    
 
     use super::*;
 
@@ -350,8 +350,8 @@ mod tests {
         // 1. Check TypeIds
         let type_a = TypeId::of::<A>();
         let type_b = TypeId::of::<B>();
-        println!("TypeId A: {:?}", type_a);
-        println!("TypeId B: {:?}", type_b);
+        println!("TypeId A: {type_a:?}");
+        println!("TypeId B: {type_b:?}");
         assert_ne!(
             type_a, type_b,
             "CRITICAL: TypeIds are identical! Compiler/Hasher issue."
@@ -360,44 +360,21 @@ mod tests {
         // 2. Check Static ID Generation (First Pass)
         println!("--- First Access ---");
         let id_a_1 = A::get_id();
-        println!("A::get_id() -> {:?}", id_a_1);
+        println!("A::get_id() -> {id_a_1:?}");
 
         let id_b_1 = B::get_id();
-        println!("B::get_id() -> {:?}", id_b_1);
+        println!("B::get_id() -> {id_b_1:?}");
 
         // 3. Check Static Caching (Second Pass)
         println!("--- Second Access (Cached) ---");
         let id_a_2 = A::get_id();
-        println!("A::get_id() -> {:?}", id_a_2);
+        println!("A::get_id() -> {id_a_2:?}");
         assert_eq!(id_a_1, id_a_2, "A ID changed! Static cache is broken.");
 
         let id_b_2 = B::get_id();
-        println!("B::get_id() -> {:?}", id_b_2);
+        println!("B::get_id() -> {id_b_2:?}");
         assert_eq!(id_b_1, id_b_2, "B ID changed! Static cache is broken.");
 
         println!("=== END DEBUG ===\n");
-    }
-
-    #[test]
-    fn prove_linker_merging() {
-        // Two distinct types with identical layout
-        #[derive(Debug)]
-        struct A(f32);
-        #[derive(Debug)]
-        struct B(f32);
-
-        impl_component!(A, B);
-
-        let a = A::get_id();
-        let b = B::get_id();
-
-        // In Debug: likely distinct.
-        // In Release with LTO: likely merged (a == b).
-        // If a == b, the ECS breaks because A and B are treated as the same component.
-        if a == b {
-            println!("PROOF: Linker merged A and B statics!");
-        } else {
-            println!("Safe (for now).");
-        }
     }
 }

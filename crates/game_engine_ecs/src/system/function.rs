@@ -134,9 +134,11 @@ impl_all_tuples!(
 // 4. Tests
 // ----------------------------------------------------------------------------
 #[cfg(test)]
-mod tests {
+mod function_tests {
     use super::*;
+    use crate::message::MessageQueue;
     use crate::prelude::*;
+    use crate::query::Changed;
     use crate::system::{Query, UnsafeWorldCell};
 
     // ========================================================================
@@ -193,6 +195,8 @@ mod tests {
         fn run(&mut self) {
             let cell = UnsafeWorldCell::new(&mut self.world);
             for system in &mut self.systems {
+                // SAFETY: The world cell is valid for the duration of the run.
+                system.update_access(unsafe { cell.world() });
                 unsafe {
                     system.run(cell);
                 }
@@ -318,5 +322,363 @@ mod tests {
         // We expect the fully qualified path, or at least the function name
         assert!(s1.name.contains("movement_system"));
         assert!(s2.name.contains("frame_counter_system"));
+    }
+    // ========================================================================
+    // CHANGED FILTER TESTS
+    // ========================================================================
+
+    fn changed_tracker_system(
+        mut query: Query<&Position, Changed<Position>>,
+        mut count: ResMut<FrameCount>,
+    ) {
+        for _ in query.iter() {
+            count.0 += 1;
+        }
+    }
+
+    #[test]
+    fn test_system_change_detection() {
+        let mut app = App::new();
+        // Use FrameCount as a "Changed Counter" for this test
+        app.world.resources_mut().insert(FrameCount(0));
+
+        app.add_system(changed_tracker_system);
+
+        // 1. Spawn Entity (Tick 1)
+        // Note: World starts at Tick 1 by default
+        let e = app.world.spawn((Position { x: 0.0, y: 0.0 },));
+        app.world.flush();
+
+        // Run Frame 1
+        // Component Tick: 1 (spawn)
+        // System Last Run: 0 (init default)
+        // Filter: 1 > 0 -> Matches
+        app.run();
+
+        assert_eq!(
+            app.world.resources().get::<FrameCount>().unwrap().0,
+            1,
+            "Spawn should trigger changed detection"
+        );
+
+        // 2. Increment Tick (Tick 2)
+        // App::run doesn't auto-increment tick in this mock, so we do it manually
+        app.world.increment_tick();
+
+        // Run Frame 2 (No mutations)
+        // Component Tick: 1
+        // System Last Run: 1 (from Frame 1)
+        // Filter: 1 > 1 -> Fails
+        app.run();
+
+        assert_eq!(
+            app.world.resources().get::<FrameCount>().unwrap().0,
+            1,
+            "No changes should be detected on static entity"
+        );
+
+        // 3. Mutate Entity (Tick 3)
+        app.world.increment_tick();
+
+        {
+            // Mutate manually via direct world access to simulate another system
+            let mut q = crate::query::QueryState::<&mut Position>::new(&mut app.world.registry);
+            let mut pos = q.get(&mut app.world, e).unwrap();
+            pos.x += 1.0;
+            // Guard drop updates component tick to 3
+        }
+
+        // Run Frame 3
+        // Component Tick: 3
+        // System Last Run: 2
+        // Filter: 3 > 2 -> Matches
+        app.run();
+
+        assert_eq!(
+            app.world.resources().get::<FrameCount>().unwrap().0,
+            2,
+            "Mutation should trigger changed detection"
+        );
+    }
+
+    #[test]
+    fn test_changed_filter_with_multiple_entities() {
+        let mut app = App::new();
+        app.world.resources_mut().insert(FrameCount(0));
+        app.add_system(changed_tracker_system);
+
+        let _e1 = app.world.spawn((Position::default(),));
+        app.world.flush();
+
+        // Frame 1: e1 detected
+        app.run();
+        assert_eq!(app.world.resources().get::<FrameCount>().unwrap().0, 1);
+
+        app.world.increment_tick();
+
+        // Spawn e2 (Tick 2)
+        let _e2 = app.world.spawn((Position::default(),));
+        app.world.flush();
+
+        // Frame 2: e1 (old) ignored, e2 (new) detected
+        app.run();
+        assert_eq!(
+            app.world.resources().get::<FrameCount>().unwrap().0,
+            2,
+            "Should detect only the new entity"
+        );
+    }
+
+    // ========================================================================
+    // MOCK DATA
+    // ========================================================================
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct DamageEvent {
+        amount: u32,
+    }
+
+    // A resource to track what the receiver system actually saw
+    #[derive(Debug, Default)]
+    struct ReceivedLog {
+        total_damage: u32,
+        event_count: u32,
+    }
+
+    impl_component!(ReceivedLog); // Treat as resource, impl not strictly necessary but good practice
+
+    // ========================================================================
+    // SYSTEMS
+    // ========================================================================
+
+    fn sender_system_a(mut events: MessageWriter<DamageEvent>) {
+        events.write(DamageEvent { amount: 10 });
+    }
+
+    fn sender_system_b(mut events: MessageWriter<DamageEvent>) {
+        events.write(DamageEvent { amount: 20 });
+        events.write(DamageEvent { amount: 30 });
+    }
+
+    fn receiver_system(mut events: MessageReader<DamageEvent>, mut log: ResMut<ReceivedLog>) {
+        for event in events.iter() {
+            log.total_damage += event.amount;
+            log.event_count += 1;
+        }
+    }
+
+    // ========================================================================
+    // TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_same_frame_communication() {
+        let mut world = World::new();
+        world.resources_mut().insert(ReceivedLog::default());
+
+        // Initialize Systems
+        let mut sender = sender_system_a.into_system();
+        let mut receiver = receiver_system.into_system();
+
+        sender.init(&mut world);
+        receiver.init(&mut world);
+
+        // --- FRAME 1 ---
+        // 1. Run Sender
+        unsafe {
+            sender.run(UnsafeWorldCell::new(&mut world));
+        }
+
+        // 2. Run Receiver (Same Frame)
+        // expected behavior: The MessageReader implementation iterates `front` + `back`.
+        // Since we haven't swapped, the message is in `back`. The reader SHOULD see it.
+        unsafe {
+            receiver.run(UnsafeWorldCell::new(&mut world));
+        }
+
+        let log = world.resources().get::<ReceivedLog>().unwrap();
+        assert_eq!(log.total_damage, 10);
+        assert_eq!(log.event_count, 1);
+    }
+
+    #[test]
+    fn test_cross_frame_communication() {
+        let mut world = World::new();
+        world.resources_mut().insert(ReceivedLog::default());
+
+        let mut sender = sender_system_a.into_system();
+        let mut receiver = receiver_system.into_system();
+
+        sender.init(&mut world);
+        receiver.init(&mut world);
+
+        // --- FRAME 1 ---
+        // Run Sender only
+        unsafe {
+            sender.run(UnsafeWorldCell::new(&mut world));
+        }
+
+        // Validate receiver hasn't run
+        {
+            let log = world.resources().get::<ReceivedLog>().unwrap();
+            assert_eq!(log.event_count, 0);
+        }
+
+        // --- SIMULATE END OF FRAME ---
+        // Manually swap buffers on the resource
+        {
+            let mut queue = world
+                .resources_mut()
+                .get_mut::<MessageQueue<DamageEvent>>()
+                .unwrap();
+            queue.swap_buffers();
+        }
+
+        // --- FRAME 2 ---
+        // Run Receiver
+        unsafe {
+            receiver.run(UnsafeWorldCell::new(&mut world));
+        }
+
+        let log = world.resources().get::<ReceivedLog>().unwrap();
+        assert_eq!(
+            log.total_damage, 10,
+            "Message should persist across frame swap"
+        );
+        assert_eq!(log.event_count, 1);
+    }
+
+    #[test]
+    fn test_reader_cursor_progress() {
+        let mut world = World::new();
+        world.resources_mut().insert(ReceivedLog::default());
+
+        let mut sender = sender_system_a.into_system(); // Sends 10
+        let mut receiver = receiver_system.into_system();
+
+        sender.init(&mut world);
+        receiver.init(&mut world);
+
+        // --- BATCH 1 ---
+        unsafe {
+            sender.run(UnsafeWorldCell::new(&mut world));
+        }
+        unsafe {
+            receiver.run(UnsafeWorldCell::new(&mut world));
+        }
+
+        {
+            let log = world.resources().get::<ReceivedLog>().unwrap();
+            assert_eq!(log.total_damage, 10);
+        }
+
+        // --- BATCH 2 ---
+        // Run sender again. Receiver runs again.
+        // Receiver should ONLY process the new message, not re-process the old one.
+        unsafe {
+            sender.run(UnsafeWorldCell::new(&mut world));
+        }
+        unsafe {
+            receiver.run(UnsafeWorldCell::new(&mut world));
+        }
+
+        let log = world.resources().get::<ReceivedLog>().unwrap();
+        // 10 (batch 1) + 10 (batch 2) = 20
+        // If it re-read batch 1, it would be 30.
+        assert_eq!(log.total_damage, 20);
+        assert_eq!(log.event_count, 2);
+    }
+
+    #[test]
+    fn test_independent_readers() {
+        // Create a second log type for a second system
+        #[derive(Debug, Default)]
+        struct SpyLog {
+            count: u32,
+        }
+        impl_component!(SpyLog);
+
+        fn spy_system(mut events: MessageReader<DamageEvent>, mut log: ResMut<SpyLog>) {
+            for _ in events.iter() {
+                log.count += 1;
+            }
+        }
+
+        let mut world = World::new();
+        world.resources_mut().insert(ReceivedLog::default());
+        world.resources_mut().insert(SpyLog::default());
+
+        let mut sender = sender_system_b.into_system(); // Sends 2 events (20, 30)
+        let mut receiver_1 = receiver_system.into_system();
+        let mut receiver_2 = spy_system.into_system();
+
+        sender.init(&mut world);
+        receiver_1.init(&mut world);
+        receiver_2.init(&mut world);
+
+        // --- RUN ---
+        unsafe {
+            sender.run(UnsafeWorldCell::new(&mut world));
+        } // writes 2 events
+
+        // Both systems read the SAME events
+        unsafe {
+            receiver_1.run(UnsafeWorldCell::new(&mut world));
+        }
+        unsafe {
+            receiver_2.run(UnsafeWorldCell::new(&mut world));
+        }
+
+        let log1 = world.resources().get::<ReceivedLog>().unwrap();
+        let log2 = world.resources().get::<SpyLog>().unwrap();
+
+        assert_eq!(log1.event_count, 2);
+        assert_eq!(log1.total_damage, 50); // 20 + 30
+
+        assert_eq!(
+            log2.count, 2,
+            "Second system should independently read the messages"
+        );
+    }
+
+    #[test]
+    fn test_accumulation_and_buffer_swaps() {
+        let mut world = World::new();
+        world.resources_mut().insert(ReceivedLog::default());
+
+        let mut sender = sender_system_a.into_system(); // Sends 10
+        let mut receiver = receiver_system.into_system();
+
+        sender.init(&mut world);
+        receiver.init(&mut world);
+
+        // 1. Frame 1: Write
+        unsafe {
+            sender.run(UnsafeWorldCell::new(&mut world));
+        }
+
+        // 2. Swap Buffers
+        {
+            let mut queue = world
+                .resources_mut()
+                .get_mut::<MessageQueue<DamageEvent>>()
+                .unwrap();
+            queue.swap_buffers();
+        }
+
+        // 3. Frame 2: Write MORE
+        unsafe {
+            sender.run(UnsafeWorldCell::new(&mut world));
+        }
+
+        // 4. Receiver runs now.
+        // It should see Frame 1 (now in Front Buffer) AND Frame 2 (now in Back Buffer)
+        unsafe {
+            receiver.run(UnsafeWorldCell::new(&mut world));
+        }
+
+        let log = world.resources().get::<ReceivedLog>().unwrap();
+        assert_eq!(log.event_count, 2);
+        assert_eq!(log.total_damage, 20);
     }
 }

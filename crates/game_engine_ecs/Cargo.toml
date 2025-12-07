@@ -8,6 +8,7 @@ smallvec.workspace = true
 game_engine_derive.workspace = true
 
 [dev-dependencies]
+bevy_ecs = "0.17"
 criterion = "0.8"
 
 [profile.release]
@@ -27,4 +28,8 @@ harness = false
 
 [[bench]]
 name = "system_ecs_vs_vec"
+harness = false
+
+[[bench]]
+name = "spawn_bench"
 harness = false

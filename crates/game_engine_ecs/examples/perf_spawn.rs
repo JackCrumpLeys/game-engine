@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::hint::black_box;
 
 use game_engine_derive::Component;

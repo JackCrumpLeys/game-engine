@@ -113,13 +113,14 @@ impl ColumnBorrowChecker {
 
     /// Extend this borrow checker with another borrow checker.
     /// Panics at runtime if there is a conflict.
-    pub fn extend(&mut self, other: &ColumnBorrowChecker) {
+    ///
+    /// Returns true on change, false if no change.
+    pub fn extend(&mut self, other: &ColumnBorrowChecker) -> bool {
         if self.conflicts(other) {
             panic!("conflicting borrows detected");
         }
 
-        self.borrows.union(&other.borrows);
-        self.mut_borrows.union(&other.mut_borrows);
+        self.borrows.union(&other.borrows) || self.mut_borrows.union(&other.mut_borrows)
     }
 
     /// Create a new ColumnBorrowChecker by retaining only components from a specific archetype.

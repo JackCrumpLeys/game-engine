@@ -53,6 +53,12 @@ pub struct WorldThreadLocalStore<T> {
 unsafe impl<T: Send> Sync for WorldThreadLocalStore<T> {}
 unsafe impl<T: Send> Send for WorldThreadLocalStore<T> {}
 
+impl<T: FromWorldThread> Default for WorldThreadLocalStore<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: FromWorldThread> WorldThreadLocalStore<T> {
     pub fn new() -> Self {
         let mut slots = Vec::with_capacity(MAX_ECS_THREADS);
@@ -99,5 +105,180 @@ impl<T: FromWorldThread> WorldThreadLocalStore<T> {
             let slot = unsafe { &mut *padded_slot.inner.get() };
             slot.as_mut()
         })
+    }
+}
+
+#[cfg(test)]
+mod threading_tests {
+    use super::*;
+    use crate::world::World;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::thread;
+
+    // ========================================================================
+    // MOCKS
+    // ========================================================================
+
+    struct MockThreadData {
+        thread_id: usize,
+        value: u32,
+    }
+
+    impl FromWorldThread for MockThreadData {
+        fn new_thread_local(thread_id: usize, _world: &World) -> Self {
+            Self {
+                thread_id,
+                value: 0,
+            }
+        }
+    }
+
+    // ========================================================================
+    // TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_thread_id_uniqueness() {
+        const THREAD_COUNT: usize = 10;
+        let ids = Arc::new(Mutex::new(HashSet::new()));
+        let mut handles = Vec::new();
+
+        // 1. Spawn threads and collect their ecs_thread_id
+        for _ in 0..THREAD_COUNT {
+            let ids_clone = ids.clone();
+            handles.push(thread::spawn(move || {
+                let id = ecs_thread_id().expect("Should not run out of thread IDs");
+                ids_clone.lock().unwrap().insert(id);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // 2. Verify all IDs were unique
+        let set = ids.lock().unwrap();
+        assert_eq!(set.len(), THREAD_COUNT);
+    }
+
+    #[test]
+    fn test_store_lazy_init_single_thread() {
+        let world = World::new();
+        let store = WorldThreadLocalStore::<MockThreadData>::new();
+
+        // 1. Access first time -> Init
+        {
+            let data = store.get(&world);
+            assert_eq!(data.value, 0); // Default from new_thread_local
+            data.value = 42;
+        }
+
+        // 2. Access second time -> Persistence
+        {
+            let data = store.get(&world);
+            assert_eq!(data.value, 42); // Should persist
+        }
+    }
+
+    #[test]
+    fn test_store_concurrent_access_and_isolation() {
+        const THREAD_COUNT: usize = 8;
+
+        // The store is Sync, so we wrap in Arc to share across threads
+        let store = Arc::new(WorldThreadLocalStore::<MockThreadData>::new());
+        let barrier = Arc::new(Barrier::new(THREAD_COUNT));
+
+        let mut handles = Vec::new();
+
+        for i in 0..THREAD_COUNT {
+            let store_clone = store.clone();
+            let barrier_clone = barrier.clone();
+
+            handles.push(thread::spawn(move || {
+                // We create a dummy world here just to satisfy the signature.
+                // In a real engine, the Scheduler provides the world access.
+                let world = World::new();
+
+                // 1. Initialize data for this thread
+                {
+                    let data = store_clone.get(&world);
+                    // Verify the Mock factory got the correct ID logic
+                    // (Note: we can't strictly assert data.thread_id == i because OS thread scheduling is random,
+                    // but we can ensure data.thread_id matches ecs_thread_id())
+                    assert_eq!(data.thread_id, ecs_thread_id().unwrap());
+
+                    // Set a unique value based on loop index to verify isolation
+                    data.value = (i as u32 + 1) * 100;
+                }
+
+                // Wait for all threads to initialize and write
+                barrier_clone.wait();
+
+                // 2. Verify data persisted and wasn't overwritten by other threads
+                {
+                    let data = store_clone.get(&world);
+                    assert_eq!(data.value, (i as u32 + 1) * 100);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_iteration_and_aggregation() {
+        // This simulates "flushing" thread local buffers back to the main world
+        const THREAD_COUNT: usize = 4;
+        let store = WorldThreadLocalStore::<MockThreadData>::new();
+
+        // Simulate parallel execution using scoped threads or just simple spawn/join.
+        // Since `WorldThreadLocalStore` is internal to the World usually,
+        // testing this requires wrapping it in Arc for the writing phase.
+
+        let shared_store = Arc::new(store);
+        let mut handles = Vec::new();
+
+        for _ in 0..THREAD_COUNT {
+            let s = shared_store.clone();
+            handles.push(thread::spawn(move || {
+                let world = World::new();
+                let data = s.get(&world);
+                data.value = 1; // Every thread adds 1
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Now we need to get mutable access back to iterate.
+        // ARC::try_unwrap is the cleanest way in a test to convert Arc<T> back to T
+        // provided all threads are joined.
+        let mut store = Arc::try_unwrap(shared_store)
+            .ok()
+            .expect("Arc should be free");
+
+        // Iterate and sum
+        let sum: u32 = store.iter_mut().map(|d| d.value).sum();
+
+        // Note: iter_mut only iterates INITIALIZED slots.
+        // Since we spawned 4 threads, we expect sum to be 4.
+        // We also expect the main thread (running the test) might NOT have initialized a slot yet,
+        // or if it did, it's 0.
+
+        assert_eq!(sum, THREAD_COUNT as u32);
+    }
+
+    #[test]
+    fn test_max_threads_limit() {
+        // This checks ecs_thread_id logic, though we can't easily spawn 1024 threads in a unit test
+        // without slowing things down. We verify the ID is consistent.
+        let id_1 = ecs_thread_id();
+        let id_2 = ecs_thread_id();
+        assert_eq!(id_1, id_2);
+        assert!(id_1.unwrap() < crate::threading::MAX_ECS_THREADS);
     }
 }

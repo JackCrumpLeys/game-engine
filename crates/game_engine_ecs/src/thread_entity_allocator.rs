@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use crate::{
     entity::{Entities, Entity},
@@ -112,5 +112,126 @@ impl LocalThreadEntityAllocator {
 
             self.last_seen_tick = current_tick;
         }
+    }
+}
+
+#[cfg(test)]
+mod entity_allocator_tests {
+    use super::*;
+    use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn test_alloc_refills_lazily() {
+        let global = Arc::new(RwLock::new(Entities::new()));
+        let mut local = LocalThreadEntityAllocator::new(global.clone());
+
+        // 1. Initial State
+        assert_eq!(local.next_entities.len(), 0);
+        assert_eq!(global.read().unwrap().len(), 0);
+
+        // 2. Alloc one
+        // Should trigger refill of START_BATCH_SIZE
+        let _e = local.alloc(0);
+
+        // Global len should be START_BATCH_SIZE
+        assert_eq!(global.read().unwrap().len(), START_BATCH_SIZE as usize);
+        // Local buffer should have (START - 1) left
+        assert_eq!(local.next_entities.len(), (START_BATCH_SIZE - 1) as usize);
+    }
+
+    #[test]
+    fn test_growth_strategy() {
+        let global = Arc::new(RwLock::new(Entities::new()));
+        let mut local = LocalThreadEntityAllocator::new(global);
+
+        // 1. First batch
+        let _ = local.alloc(0);
+
+        let expected_stage_1 = START_BATCH_SIZE * GROWTH_FACTOR;
+        assert_eq!(local.take, expected_stage_1);
+
+        // 2. Consume the rest of the buffer
+        local.next_entities.clear();
+
+        // 3. Alloc again -> Triggers refill
+        let _ = local.alloc(0);
+
+        let expected_stage_2 = expected_stage_1 * GROWTH_FACTOR;
+        assert_eq!(local.take, expected_stage_2);
+
+        // Ensure we don't exceed max (sanity check, assuming test doesn't run billions of times)
+        assert!(local.take <= MAX_BATCH_SIZE);
+    }
+
+    #[test]
+    fn test_decay_strategy() {
+        let global = Arc::new(RwLock::new(Entities::new()));
+        let mut local = LocalThreadEntityAllocator::new(global);
+
+        // Ramp up the growth manually to test decay
+        // Start: START_BATCH_SIZE
+        local.take = START_BATCH_SIZE * GROWTH_FACTOR * GROWTH_FACTOR; // e.g., 64 if start=16, growth=2
+        let current_take = local.take;
+
+        // Advance Tick
+        // Logic: if current_tick > last_seen, decay.
+        local.alloc(1);
+
+        let expected_decay_1 = (current_take as f32 * DECAY_FACTOR) as u32;
+        assert_eq!(local.take, expected_decay_1.max(START_BATCH_SIZE));
+
+        // Advance again
+        local.alloc(2);
+        let expected_decay_2 = (local.take as f32 * DECAY_FACTOR) as u32;
+        assert_eq!(local.take, expected_decay_2.max(START_BATCH_SIZE));
+
+        // Verify min clamp
+        // Force take to be small, then decay
+        local.take = START_BATCH_SIZE;
+        local.alloc(3);
+        assert_eq!(local.take, START_BATCH_SIZE);
+    }
+
+    #[test]
+    fn test_batch_passthrough() {
+        let global = Arc::new(RwLock::new(Entities::new()));
+        let mut local = LocalThreadEntityAllocator::new(global);
+
+        // 1. Put some entities in local cache (START_BATCH_SIZE)
+        let _ = local.alloc(0);
+        assert_eq!(local.next_entities.len(), (START_BATCH_SIZE - 1) as usize);
+
+        // 2. Request a batch larger than cache
+        let req_size = (START_BATCH_SIZE * 2) as usize;
+        let batch = local.alloc_batch(0, req_size);
+
+        assert_eq!(batch.len(), req_size);
+
+        // Cache should be refreshed/refilled after this operation
+        assert!(!local.next_entities.is_empty());
+    }
+
+    #[test]
+    fn test_batch_pure_local() {
+        let global = Arc::new(RwLock::new(Entities::new()));
+        let mut local = LocalThreadEntityAllocator::new(global.clone());
+
+        // Fill cache
+        let _ = local.alloc(0);
+
+        // Request small batch that fits in remainder
+        let small_req = 5;
+        // Ensure test config allows this
+        assert!((START_BATCH_SIZE as usize) > small_req);
+
+        let batch = local.alloc_batch(0, small_req);
+        assert_eq!(batch.len(), small_req);
+
+        // Should not have touched global again
+        assert_eq!(global.read().unwrap().len(), START_BATCH_SIZE as usize);
+        assert_eq!(
+            local.next_entities.len(),
+            (START_BATCH_SIZE as usize - 1 - small_req)
+        );
     }
 }

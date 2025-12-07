@@ -1,5 +1,4 @@
-use crate::archetype::Archetype;
-use crate::component::{Component, ComponentId, ComponentMask, ComponentMeta, ComponentRegistry};
+use crate::component::{Component, ComponentId, ComponentMask, ComponentMeta};
 use crate::storage::TypeErasedSequence;
 use std::any::type_name;
 
@@ -30,6 +29,10 @@ pub trait ManyRowBundle {
     unsafe fn put_many(self, seqs: &mut [&mut TypeErasedSequence]);
 
     fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 // Macro to implement Bundle for tuples (A, B, C...)
@@ -99,7 +102,7 @@ macro_rules! impl_bundle {
             type Item = ($($name,)*);
 
             #[inline(always)]
-            unsafe fn put_many(mut self, mut seqs: &mut [&mut TypeErasedSequence]) {
+            unsafe fn put_many(mut self, seqs: &mut [&mut TypeErasedSequence]) { unsafe {
                 // 1. Setup pointers
                 let len = self.len();
                 let base_ptr = self.as_ptr();
@@ -111,17 +114,15 @@ macro_rules! impl_bundle {
 
                 // 3. Hot Loop (Copy Memory)
                 for i in 0..len {
-                    unsafe {
-                        let item_ptr = base_ptr.add(i);
-                        $(
-                            // Read from Vec buffer
-                            let field_ptr = std::ptr::addr_of!((*item_ptr).$num);
-                            let val = std::ptr::read(field_ptr);
+                    let item_ptr = base_ptr.add(i);
+                    $(
+                        // Read from Vec buffer
+                        let field_ptr = std::ptr::addr_of!((*item_ptr).$num);
+                        let val = std::ptr::read(field_ptr);
 
-                            // Write to Column (Unchecked, we reserved above)
-                            seqs[$num].push_unchecked(val);
-                        )*
-                    }
+                        // Write to Column (Unchecked, we reserved above)
+                        seqs[$num].push_unchecked(val);
+                    )*
                 }
 
                 // We set len to 0.
@@ -129,7 +130,7 @@ macro_rules! impl_bundle {
                 // - It sees len 0, so it calls destructors on 0 items (Correct, we moved them).
                 // - It sees capacity > 0, so it deallocates the backing buffer
                 self.set_len(0);
-            }
+            }}
 
             #[inline(always)]
             fn len(&self) -> usize {
@@ -147,7 +148,7 @@ impl Bundle for () {
     fn component_metas() -> Vec<ComponentMeta> {
         vec![]
     }
-    unsafe fn put(self, columns: &mut [&mut TypeErasedSequence], ids: &[ComponentId]) {}
+    unsafe fn put(self, _columns: &mut [&mut TypeErasedSequence], _ids: &[ComponentId]) {}
 
     fn mask() -> ComponentMask {
         ComponentMask::new()

@@ -38,13 +38,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         format!(
             r#"
-            pub mod {} {{
+            pub mod {safe_mod_name} {{
                 vulkano_shaders::shader! {{
-                    bytes: "{}"
+                    bytes: "{safe_path}"
                 }}
             }}
-            "#,
-            safe_mod_name, safe_path
+            "#
         )
     };
 

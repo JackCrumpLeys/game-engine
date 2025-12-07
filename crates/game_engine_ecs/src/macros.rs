@@ -73,28 +73,3 @@ macro_rules! impl_component {
         )*
     };
 }
-
-macro_rules! impl_component_with_lifetime {
-    ($($t:ty),*) => {
-        $(
-            impl<'a> crate::component::Component for $t {
-                #[inline(always)]
-                fn get_id() -> crate::component::ComponentId {
-                    use std::sync::atomic::{AtomicUsize, Ordering};
-                    // Unique static per type instantiation
-                    static CACHED_ID: AtomicUsize = AtomicUsize::new(usize::MAX);
-
-                    let id = CACHED_ID.load(Ordering::Relaxed);
-                    if id != usize::MAX {
-                        return crate::component::ComponentId(id);
-                    }
-
-                    // Fallback to global allocator
-                    let new_id = crate::component::allocate_component_id::<Self>();
-                    CACHED_ID.store(new_id.0, Ordering::Relaxed);
-                    new_id
-                }
-            }
-        )*
-    };
-}

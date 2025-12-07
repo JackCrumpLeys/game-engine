@@ -1,7 +1,6 @@
 use crate::component::{ComponentId, ComponentMask, ComponentRegistry};
 use crate::entity::Entity;
 use crate::storage::Column;
-use std::collections::HashMap;
 use std::ops::Deref;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -196,7 +195,7 @@ mod tests {
         let arch_id = ArchetypeId(0);
         let mut arch = Archetype::new(
             arch_id,
-            ComponentMask::from_ids(&vec![pos_id, vel_id]),
+            ComponentMask::from_ids(&[pos_id, vel_id]),
             &registry,
         );
 

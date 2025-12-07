@@ -220,10 +220,12 @@ pub struct Query<'w, Q: QueryToken, F: Filter = ()> {
     // Maps Q -> Q::Persistent (The static data struct)
     query: &'w mut QueryInner<Q::Persistent, F::Persistent>,
     world: UnsafeWorldCell<'w>,
+    tick: u32,
 }
 
 impl<Q: QueryToken, F: Filter> SystemParam for Query<'_, Q, F> {
-    type State = (QueryInner<Q::Persistent, F::Persistent>, ArchetypeId);
+    /// Query_inner, Last known archetype idx, World tick of last system run
+    type State = (QueryInner<Q::Persistent, F::Persistent>, ArchetypeId, u32);
     type Item<'w> = Query<'w, Q, F>;
 
     const DYNAMIC: bool = true;
@@ -236,27 +238,41 @@ impl<Q: QueryToken, F: Filter> SystemParam for Query<'_, Q, F> {
             access.col[id.0].extend(&col);
         }
 
-        (query, ArchetypeId(world.archetypes.len()))
+        (
+            query,
+            ArchetypeId(world.archetypes.len()),
+            world.tick().wrapping_sub(1),
+        )
     }
 
     unsafe fn get_param<'w>(
         state: &'w mut Self::State,
         world: UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
-        Query {
+        let res = Query {
             query: &mut state.0,
             world,
-        }
+            tick: state.2,
+        };
+        // SAFETY: The scheduler ensures that the tick is static during this system run.
+        state.2 = unsafe { world.world().tick() };
+        res
     }
 
     fn update_access(state: &mut Self::State, world: &World, access: &mut SystemAccess) -> bool {
         let mut changed = false;
         if *state.0.last_updated_arch_idx() != world.archetypes.len() {
             for (id, col) in state.0.granular_borrow_check(world, state.1) {
-                access.col[id.0].extend(&col);
+                changed = if let Some(system_col) = access.col.get_mut(id.0) {
+                    system_col.extend(&col)
+                } else {
+                    // New archetype added since last frame, extend the access vector
+                    access.col.push(col);
+                    true
+                };
             }
-            changed = true;
         }
+        state.1 = ArchetypeId(world.archetypes.len());
         changed
     }
 }
@@ -270,7 +286,7 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
         let world = unsafe { self.world.world_mut() };
         debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
         // Explicitly pass the View and Filter types to the generic iter method
-        self.query.iter::<Q::View<'_>, F>(world)
+        self.query.iter::<Q::View<'_>, F>(world, self.tick)
     }
 
     /// runs a closure for each item in the query.
@@ -281,7 +297,8 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
         // Saftety at this point the column borrow checks have been done by the scheduler.
         let world = unsafe { self.world.world_mut() };
         debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
-        self.query.for_each::<Q::View<'a>, F, Func>(world, func)
+        self.query
+            .for_each::<Q::View<'a>, F, Func>(world, func, self.tick)
     }
 
     /// get a specific entity's query item, if it exists.
@@ -290,8 +307,9 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
         entity: crate::prelude::Entity,
     ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
         let world = unsafe { self.world.world_mut() };
+        debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
         // debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0 as usize);
-        self.query.get::<Q::View<'_>, F>(world, entity)
+        self.query.get::<Q::View<'_>, F>(world, entity, self.tick)
     }
 }
 
@@ -303,7 +321,7 @@ macro_rules! impl_system_param_tuple {
             type Item<'w> = ($($name::Item<'w>,)*);
 
             // If ANY param is dynamic, the tuple is dynamic
-            const DYNAMIC: bool = false $(|| $name::DYNAMIC)*;
+            const DYNAMIC: bool = $($name::DYNAMIC)||*;
 
             fn init_state(world: &mut World, access: &mut SystemAccess) -> Self::State {
                 (
@@ -328,13 +346,9 @@ macro_rules! impl_system_param_tuple {
             ) -> bool {
                 #[allow(non_snake_case)]
                 let ($($name,)*) = state;
-                let mut changed = false;
                 $(
-                    if $name::update_access($name, world, access) {
-                        changed = true;
-                    }
-                )*
-                changed
+                     $name::update_access($name, world, access)
+                )||*
             }
         }
     };

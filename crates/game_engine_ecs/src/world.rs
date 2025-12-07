@@ -4,14 +4,13 @@ use crate::archetype::{Archetype, ArchetypeId};
 use crate::bundle::{Bundle, ManyRowBundle};
 use crate::component::{ComponentId, ComponentMask, ComponentMeta, ComponentRegistry};
 use crate::entity::{Entities, Entity};
-use crate::query::{Filter, QueryInner, QueryToken};
+use crate::query::{Filter, QueryState, QueryToken};
 use crate::resource::Resources;
 use crate::storage::TypeErasedSequence;
 use crate::thread_entity_allocator::LocalThreadEntityAllocator;
 use crate::threading::{FromWorldThread, WorldThreadLocalStore};
-use std::collections::HashMap;
 use std::ops::{Deref, Index, IndexMut};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Copy, Debug)]
 pub struct EntityLocation {
@@ -37,9 +36,11 @@ pub struct World {
     pub(crate) archetypes: ArchetypeStore,
     // Maps Entity Index -> Location
     entity_index: Vec<Option<EntityLocation>>,
-    archetype_index: HashMap<ComponentMask, ArchetypeId>,
     resources: Resources,
+    // This is updated between every batch/during a flush
     current_tick: u32,
+    /// THis value is incremented every time we have finished running all the systems for a frame
+    curent_frame: u32,
 }
 
 struct ThreadLocalWorldData {
@@ -81,20 +82,26 @@ impl FromWorldThread for EntityInsertBuffer {
 }
 
 impl EntityInsertBuffer {
+    /// Pls call every frame
+    /// (after drain_cols)
     fn clear(&mut self) {
         self.ids.clear();
         self.masks.clear();
-        self.bundle_cols.clear();
+        self.comp_ids.clear();
+        self.comp_metas.clear();
     }
 
+    #[inline(always)]
+    fn drain_cols(&mut self) -> Vec<Vec<TypeErasedSequence>> {
+        self.bundle_cols.drain(..).collect()
+    }
+
+    #[inline(always)]
     fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
 
-    fn len(&self) -> usize {
-        self.ids.len()
-    }
-
+    #[inline(always)]
     fn get_or_create_archetype_buffer(&mut self, mask: ComponentMask) -> usize {
         match self.masks.binary_search(&mask) {
             Ok(index) => index,
@@ -120,7 +127,7 @@ impl EntityInsertBuffer {
         if component_ids.is_empty() {
             let mut meta: Vec<(ComponentId, ComponentMeta)> = B::component_ids()
                 .into_iter()
-                .zip(B::component_metas().into_iter())
+                .zip(B::component_metas())
                 .collect();
             meta.sort_unstable_by_key(|(id, _)| *id);
 
@@ -137,7 +144,7 @@ impl EntityInsertBuffer {
             // Note: bundle_cols elements match comp_ids order perfectly because both are sorted by ID
             bundle.put(
                 &mut bundle_cols.iter_mut().collect::<Vec<_>>(),
-                &component_ids,
+                component_ids,
             );
         }
 
@@ -145,7 +152,11 @@ impl EntityInsertBuffer {
     }
 }
 
-pub struct ArchetypeStore(Vec<Archetype>);
+pub struct ArchetypeStore {
+    inner: Vec<Archetype>,
+    // The Lookup: Sorted by Mask
+    lookup: Vec<(ComponentMask, ArchetypeId)>,
+}
 
 /// By not using a Vec directly, we can later change the storage strategy
 /// We also define only 2 mutating methods: push and index_mut
@@ -157,16 +168,36 @@ impl Default for ArchetypeStore {
 
 impl ArchetypeStore {
     pub fn new() -> Self {
-        ArchetypeStore(Vec::new())
+        ArchetypeStore {
+            inner: Vec::new(),
+            lookup: Vec::new(),
+        }
     }
 
     pub fn push(&mut self, archetype: Archetype) {
-        self.0.push(archetype);
+        let mask = archetype.component_mask;
+        let id = archetype.id;
+        self.inner.push(archetype);
+
+        // Keep lookup sorted
+        let idx = self
+            .lookup
+            .binary_search_by_key(&mask, |(m, _)| *m)
+            .unwrap_err();
+        self.lookup.insert(idx, (mask, id));
+    }
+
+    pub fn get_id(&self, mask: &ComponentMask) -> Option<ArchetypeId> {
+        // Binary search is extremely fast on small-medium datasets
+        self.lookup
+            .binary_search_by_key(mask, |(m, _)| *m)
+            .ok()
+            .map(|idx| self.lookup[idx].1)
     }
 
     /// Gets an iterator over archetypes added since the given ArchetypeId.
     pub fn since(&self, last_seen: ArchetypeId) -> impl Iterator<Item = &Archetype> {
-        self.0.iter().skip(last_seen.0)
+        self.inner.iter().skip(last_seen.0)
     }
 }
 
@@ -174,7 +205,7 @@ impl Deref for ArchetypeStore {
     type Target = Vec<Archetype>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.inner
     }
 }
 
@@ -182,13 +213,15 @@ impl Index<ArchetypeId> for ArchetypeStore {
     type Output = Archetype;
 
     fn index(&self, index: ArchetypeId) -> &Self::Output {
-        self.0.get(index.0).expect("ArchetypeId out of bounds")
+        self.inner.get(index.0).expect("ArchetypeId out of bounds")
     }
 }
 
 impl IndexMut<ArchetypeId> for ArchetypeStore {
     fn index_mut(&mut self, index: ArchetypeId) -> &mut Self::Output {
-        self.0.get_mut(index.0).expect("ArchetypeId out of bounds")
+        self.inner
+            .get_mut(index.0)
+            .expect("ArchetypeId out of bounds")
     }
 }
 
@@ -206,15 +239,15 @@ impl World {
             registry: ComponentRegistry::new(),
             archetypes: ArchetypeStore::new(),
             entity_index: Vec::new(),
-            archetype_index: HashMap::new(),
             resources: Resources::new(),
             current_tick: 1, // 0 can be special
+            curent_frame: 0,
         }
     }
 
     /// Get your thread-local entity allocator.
     pub fn entity_allocator(&self) -> &mut LocalThreadEntityAllocator {
-        self.thread_local.entity_allocators.get(&self)
+        self.thread_local.entity_allocators.get(self)
     }
 
     /// Read entities storage.
@@ -244,7 +277,7 @@ impl World {
     }
 
     pub fn spawn_with_id<B: Bundle>(&mut self, entity: Entity, bundle: B) {
-        let mut real_order = B::component_ids();
+        let real_order = B::component_ids();
         let metas = B::component_metas();
         self.registry.bulk_manual_register(&real_order, &metas);
 
@@ -374,12 +407,12 @@ impl World {
                 .insert_buffers
                 .iter_mut()
                 .filter(|b| !b.is_empty())
-                .map(|b| std::mem::take(b)),
+                .map(std::mem::take),
         );
         for mut buffer in buffers {
-            let count = buffer.len();
+            let mut cols = buffer.drain_cols();
 
-            for i in 0..count {
+            for (i, mut src_cols) in cols.drain(..).enumerate() {
                 let comp_ids = &mut buffer.comp_ids[i];
                 let metas = &buffer.comp_metas[i];
                 self.registry.bulk_manual_register(comp_ids, metas);
@@ -387,8 +420,6 @@ impl World {
                 let mask = buffer.masks[i];
                 let arch_id = self.get_or_create_archetype(mask);
                 let entities = &buffer.ids[i];
-
-                let mut src_cols = std::mem::take(&mut buffer.bundle_cols[i]);
 
                 let arch = &mut self.archetypes[arch_id];
                 let start_row = arch.len();
@@ -422,6 +453,8 @@ impl World {
                     entities_guard.initialize(entity);
                 }
             }
+
+            buffer.clear();
         }
     }
     /// Spawns an entity with the given bundle, deferring the actual insertion until later.
@@ -432,8 +465,8 @@ impl World {
             .insert_bundle(id, bundle);
     }
 
-    pub fn query<Q: QueryToken, F: Filter>(&mut self) -> QueryInner<Q::Persistent, F::Persistent> {
-        QueryInner::new::<Q, F>(&mut self.registry)
+    pub fn query<Q: QueryToken, F: Filter>(&mut self) -> QueryState<Q, F> {
+        QueryState::new(&mut self.registry)
     }
 
     pub fn resources_mut(&mut self) -> &mut Resources {
@@ -446,6 +479,10 @@ impl World {
 
     pub fn increment_tick(&mut self) {
         self.current_tick = self.current_tick.wrapping_add(1);
+    }
+
+    pub fn increment_frame(&mut self) {
+        self.curent_frame = self.curent_frame.wrapping_add(1);
     }
 
     /// Get the locarion of an entity in the world.
@@ -486,14 +523,13 @@ impl World {
     }
 
     fn get_or_create_archetype(&mut self, component_mask: ComponentMask) -> ArchetypeId {
-        if let Some(&id) = self.archetype_index.get(&component_mask) {
+        if let Some(id) = self.archetypes.get_id(&component_mask) {
             return id;
         }
 
         let id = ArchetypeId(self.archetypes.len());
         let archetype = Archetype::new(id, component_mask, &self.registry);
         self.archetypes.push(archetype);
-        self.archetype_index.insert(component_mask, id);
         id
     }
 
@@ -526,7 +562,7 @@ fn test_world_spawn_despawn() {
     assert!(!world.despawn(e1));
 }
 #[cfg(test)]
-mod batch_tests {
+mod world_tests {
     use crate::prelude::*;
     use crate::world::World;
 
@@ -690,5 +726,245 @@ mod batch_tests {
             // Vel.x should be index (from 1st slot in tuple)
             assert_eq!(vel.x, pos.y);
         }
+    }
+
+    // ========================================================================
+    // TEST COMPONENTS
+    // ========================================================================
+
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    struct Tag(u32);
+
+    // Zero-Sized Type
+    #[derive(Debug, Clone, Copy)]
+    #[allow(dead_code)]
+    struct Marker;
+
+    // Use the macro to register them
+    impl_component!(Tag, Marker);
+
+    // ========================================================================
+    // 1. BASIC LIFECYCLE (Spawn / Despawn)
+    // ========================================================================
+
+    #[test]
+    fn test_spawn_despawn_immediate() {
+        let mut world = World::new();
+
+        let e1 = world.spawn((Pos { x: 10.0, y: 10.0 },));
+        let e2 = world.spawn((Pos { x: 20.0, y: 20.0 }, Tag(1)));
+
+        // Check Liveness
+        assert!(world.entities().is_alive(e1));
+        assert!(world.entities().is_alive(e2));
+
+        // Check Initialization (Data present)
+        assert!(world.entities().is_initialized(e1));
+
+        // Check Locations
+        let loc1 = world
+            .entity_location(e1)
+            .expect("Entity 1 should have location");
+        let loc2 = world
+            .entity_location(e2)
+            .expect("Entity 2 should have location");
+        assert_ne!(
+            loc1.archetype_id, loc2.archetype_id,
+            "Should be different archetypes"
+        );
+
+        // Despawn e1
+        assert!(world.despawn(e1));
+
+        // e1 should be dead
+        assert!(!world.entities().is_alive(e1));
+        assert!(world.entity_location(e1).is_none());
+
+        // e2 should still be alive
+        assert!(world.entities().is_alive(e2));
+
+        // Double despawn check
+        assert!(!world.despawn(e1), "Should return false on double despawn");
+    }
+
+    // ========================================================================
+    // 2. BATCH SPAWNING (The "ManyRowBundle" Logic)
+    // ========================================================================
+
+    #[test]
+    fn test_spawn_batch_basic() {
+        let mut world = World::new();
+        let count = 1000;
+
+        let mut batch = Vec::with_capacity(count);
+        for i in 0..count {
+            batch.push((
+                Pos {
+                    x: i as f32,
+                    y: 0.0,
+                },
+                Tag(i as u32),
+            ));
+        }
+
+        let entities = world.spawn_batch(batch);
+        assert_eq!(entities.len(), count);
+
+        // Verify Data
+        let mut query = world.query::<(&Pos, &Tag), ()>();
+        let mut seen = 0;
+        query.for_each(&mut world, |(pos, tag)| {
+            assert_eq!(pos.x, tag.0 as f32);
+            seen += 1;
+        });
+        assert_eq!(seen, count);
+    }
+
+    #[test]
+    fn test_spawn_batch_component_reordering() {
+        // This is critical. Bundles might provide (A, B) but Archetypes sort by ID.
+        // If IDs are B=0, A=1, the archetype is [B, A].
+        // We need to ensure `spawn_batch` maps columns correctly.
+
+        let mut world = World::new();
+
+        // Create a batch where we put Vel (ID X) before Pos (ID Y)
+        // We rely on the impl_component macro or registry to assign IDs.
+        // We can't easily force IDs, but the batch logic handles mapping regardless of input order.
+        let mut batch = Vec::new();
+        for i in 0..10 {
+            batch.push((
+                Vel {
+                    x: i as f32,
+                    y: i as f32,
+                }, // Component 1
+                Pos { x: 100.0, y: 100.0 }, // Component 2
+            ));
+        }
+
+        world.spawn_batch(batch);
+
+        let mut query = world.query::<(&Pos, &Vel), ()>();
+        query.for_each(&mut world, |(pos, vel)| {
+            assert_eq!(pos.x, 100.0); // Should be the Pos value
+            assert_eq!(vel.x, vel.y); // Should be the Vel value
+        });
+    }
+
+    // ========================================================================
+    // 3. DEFERRED SPAWNING & FLUSHING
+    // ========================================================================
+
+    #[test]
+    fn test_deferred_spawn_lifecycle() {
+        let mut world = World::new();
+
+        // 1. Spawn Deferred
+        let e1 = world.spawn_deferred((Pos { x: 5.0, y: 5.0 },));
+
+        // State Check:
+        // Entity should be allocated (ALIVE) in the ID allocator...
+        assert!(world.entities().is_alive(e1));
+        // ...but NOT initialized (no data in archetype yet).
+        assert!(!world.entities().is_initialized(e1));
+
+        // Location lookup should fail because it's not in the index yet
+        assert!(world.entity_location(e1).is_none());
+
+        // Query should NOT see it
+        let mut q = world.query::<&Pos, ()>();
+        let count = q.iter(&mut world).count();
+        assert_eq!(count, 0);
+
+        // 2. Flush
+        world.flush();
+
+        // State Check:
+        assert!(world.entities().is_initialized(e1));
+        assert!(world.entity_location(e1).is_some());
+
+        // Query SHOULD see it
+        let mut q = world.query::<&Pos, ()>();
+        let mut found = false;
+        q.for_each(&mut world, |pos| {
+            assert_eq!(pos.x, 5.0);
+            found = true;
+        });
+        assert!(found);
+    }
+
+    #[test]
+    fn test_deferred_fragmentation_flush() {
+        // Spawn different archetypes in interleaved order to stress the buffer grouping logic
+        let mut world = World::new();
+
+        let e_a1 = world.spawn_deferred((Pos { x: 1.0, y: 0.0 },));
+        let _e_b1 = world.spawn_deferred((Vel { x: 0.0, y: 1.0 },));
+        let e_a2 = world.spawn_deferred((Pos { x: 2.0, y: 0.0 },));
+
+        world.flush();
+
+        let mut q_pos = world.query::<&Pos, ()>();
+        assert_eq!(q_pos.iter(&mut world).count(), 2);
+
+        let mut q_vel = world.query::<&Vel, ()>();
+        assert_eq!(q_vel.iter(&mut world).count(), 1);
+
+        // Ensure data integrity
+        let loc_a1 = world.entity_location(e_a1).unwrap();
+        let loc_a2 = world.entity_location(e_a2).unwrap();
+
+        // Should be same archetype
+        assert_eq!(loc_a1.archetype_id, loc_a2.archetype_id);
+    }
+
+    #[test]
+    fn test_multiple_flushes() {
+        // Ensure buffer clears correctly
+        let mut world = World::new();
+
+        world.spawn_deferred((Tag(1),));
+        world.flush();
+
+        let mut q = world.query::<&Tag, ()>();
+        assert_eq!(q.iter(&mut world).count(), 1);
+
+        world.spawn_deferred((Tag(2),));
+        world.flush();
+
+        let mut q = world.query::<&Tag, ()>();
+        assert_eq!(q.iter(&mut world).count(), 2);
+    }
+
+    // ========================================================================
+    // 4. MISC WORLD FEATURES
+    // ========================================================================
+
+    #[test]
+    fn test_tick_increment() {
+        let mut world = World::new();
+        let t0 = world.tick();
+        world.increment_tick();
+        assert_eq!(world.tick(), t0 + 1);
+    }
+
+    #[test]
+    fn test_world_resources() {
+        let mut world = World::new();
+
+        world.resources_mut().insert(100u32);
+
+        {
+            let res = world.resources().get::<u32>().unwrap();
+            assert_eq!(*res, 100);
+        }
+
+        {
+            let mut res = world.resources_mut().get_mut::<u32>().unwrap();
+            *res += 50;
+        }
+
+        let res = world.resources().get::<u32>().unwrap();
+        assert_eq!(*res, 150);
     }
 }
