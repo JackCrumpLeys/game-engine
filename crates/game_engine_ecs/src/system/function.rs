@@ -47,7 +47,7 @@ where
         self.state = Some(Params::init_state(world, &mut self.access));
     }
 
-    unsafe fn run(&mut self, world: UnsafeWorldCell) {
+    unsafe fn run(&mut self, world: &UnsafeWorldCell) {
         let state = self.state.as_mut().expect("System not initialized");
         let item = unsafe { Params::get_param(state, world) };
         self.func.run(item);
@@ -138,7 +138,7 @@ mod function_tests {
     use super::*;
     use crate::message::MessageQueue;
     use crate::prelude::*;
-    use crate::query::Changed;
+    use crate::query::{Changed, QueryState};
     use crate::system::{Query, UnsafeWorldCell};
 
     // ========================================================================
@@ -198,7 +198,7 @@ mod function_tests {
                 // SAFETY: The world cell is valid for the duration of the run.
                 system.update_access(unsafe { cell.world() });
                 unsafe {
-                    system.run(cell);
+                    system.run(&cell);
                 }
             }
         }
@@ -248,12 +248,12 @@ mod function_tests {
 
         // 3. Run
         unsafe {
-            system.run(UnsafeWorldCell::new(&mut world));
+            system.run(&UnsafeWorldCell::new(&mut world));
         }
 
         // 4. Verify Side Effects via standard QueryState
-        let mut q = crate::query::QueryState::<&Position>::new(&mut world.registry);
-        let pos = q.iter(&mut world).next().unwrap();
+        let mut q = QueryState::<&Position>::new(&mut world);
+        let pos = q.iter().next().unwrap();
 
         assert_eq!(pos.x, 1.0);
         assert_eq!(pos.y, 2.0);
@@ -268,8 +268,8 @@ mod function_tests {
         system.init(&mut world);
 
         unsafe {
-            system.run(UnsafeWorldCell::new(&mut world));
-            system.run(UnsafeWorldCell::new(&mut world));
+            system.run(&UnsafeWorldCell::new(&mut world));
+            system.run(&UnsafeWorldCell::new(&mut world));
         }
 
         let res = world.resources().get::<FrameCount>().unwrap();
@@ -309,8 +309,8 @@ mod function_tests {
             assert_eq!(res.0, 1);
         }
 
-        let mut q = crate::query::QueryState::<&Position>::new(&mut app.world.registry);
-        let pos = q.iter(&mut app.world).next().unwrap();
+        let mut q = QueryState::<&Position>::new(&mut app.world);
+        let pos = q.iter().next().unwrap();
         assert_eq!(pos.x, 101.0);
     }
 
@@ -382,8 +382,8 @@ mod function_tests {
 
         {
             // Mutate manually via direct world access to simulate another system
-            let mut q = crate::query::QueryState::<&mut Position>::new(&mut app.world.registry);
-            let mut pos = q.get(&mut app.world, e).unwrap();
+            let mut q = QueryState::<&mut Position>::new(&mut app.world);
+            let mut pos = q.get(e).unwrap();
             pos.x += 1.0;
             // Guard drop updates component tick to 3
         }
@@ -486,14 +486,14 @@ mod function_tests {
         // --- FRAME 1 ---
         // 1. Run Sender
         unsafe {
-            sender.run(UnsafeWorldCell::new(&mut world));
+            sender.run(&UnsafeWorldCell::new(&mut world));
         }
 
         // 2. Run Receiver (Same Frame)
         // expected behavior: The MessageReader implementation iterates `front` + `back`.
         // Since we haven't swapped, the message is in `back`. The reader SHOULD see it.
         unsafe {
-            receiver.run(UnsafeWorldCell::new(&mut world));
+            receiver.run(&UnsafeWorldCell::new(&mut world));
         }
 
         let log = world.resources().get::<ReceivedLog>().unwrap();
@@ -515,7 +515,7 @@ mod function_tests {
         // --- FRAME 1 ---
         // Run Sender only
         unsafe {
-            sender.run(UnsafeWorldCell::new(&mut world));
+            sender.run(&UnsafeWorldCell::new(&mut world));
         }
 
         // Validate receiver hasn't run
@@ -537,7 +537,7 @@ mod function_tests {
         // --- FRAME 2 ---
         // Run Receiver
         unsafe {
-            receiver.run(UnsafeWorldCell::new(&mut world));
+            receiver.run(&UnsafeWorldCell::new(&mut world));
         }
 
         let log = world.resources().get::<ReceivedLog>().unwrap();
@@ -561,10 +561,10 @@ mod function_tests {
 
         // --- BATCH 1 ---
         unsafe {
-            sender.run(UnsafeWorldCell::new(&mut world));
+            sender.run(&UnsafeWorldCell::new(&mut world));
         }
         unsafe {
-            receiver.run(UnsafeWorldCell::new(&mut world));
+            receiver.run(&UnsafeWorldCell::new(&mut world));
         }
 
         {
@@ -576,10 +576,10 @@ mod function_tests {
         // Run sender again. Receiver runs again.
         // Receiver should ONLY process the new message, not re-process the old one.
         unsafe {
-            sender.run(UnsafeWorldCell::new(&mut world));
+            sender.run(&UnsafeWorldCell::new(&mut world));
         }
         unsafe {
-            receiver.run(UnsafeWorldCell::new(&mut world));
+            receiver.run(&UnsafeWorldCell::new(&mut world));
         }
 
         let log = world.resources().get::<ReceivedLog>().unwrap();
@@ -618,15 +618,15 @@ mod function_tests {
 
         // --- RUN ---
         unsafe {
-            sender.run(UnsafeWorldCell::new(&mut world));
+            sender.run(&UnsafeWorldCell::new(&mut world));
         } // writes 2 events
 
         // Both systems read the SAME events
         unsafe {
-            receiver_1.run(UnsafeWorldCell::new(&mut world));
+            receiver_1.run(&UnsafeWorldCell::new(&mut world));
         }
         unsafe {
-            receiver_2.run(UnsafeWorldCell::new(&mut world));
+            receiver_2.run(&UnsafeWorldCell::new(&mut world));
         }
 
         let log1 = world.resources().get::<ReceivedLog>().unwrap();
@@ -654,7 +654,7 @@ mod function_tests {
 
         // 1. Frame 1: Write
         unsafe {
-            sender.run(UnsafeWorldCell::new(&mut world));
+            sender.run(&UnsafeWorldCell::new(&mut world));
         }
 
         // 2. Swap Buffers
@@ -668,13 +668,13 @@ mod function_tests {
 
         // 3. Frame 2: Write MORE
         unsafe {
-            sender.run(UnsafeWorldCell::new(&mut world));
+            sender.run(&UnsafeWorldCell::new(&mut world));
         }
 
         // 4. Receiver runs now.
         // It should see Frame 1 (now in Front Buffer) AND Frame 2 (now in Back Buffer)
         unsafe {
-            receiver.run(UnsafeWorldCell::new(&mut world));
+            receiver.run(&UnsafeWorldCell::new(&mut world));
         }
 
         let log = world.resources().get::<ReceivedLog>().unwrap();

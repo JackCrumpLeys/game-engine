@@ -1,4 +1,4 @@
-use crate::component::{ComponentId, ComponentMask, ComponentRegistry};
+use crate::component::{ComponentId, ComponentMask, ComponentRegistry, MAX_COMPONENTS};
 use crate::entity::Entity;
 use crate::storage::Column;
 use std::ops::Deref;
@@ -20,6 +20,7 @@ impl Deref for ArchetypeId {
     }
 }
 
+#[cfg_attr(debug_assertions, derive(Debug))]
 pub struct Archetype {
     pub id: ArchetypeId,
     // kept sorted for consistent hashing/lookups
@@ -27,6 +28,10 @@ pub struct Archetype {
     pub component_mask: ComponentMask,
     entities: Vec<Entity>,
     pub columns: Vec<Option<Box<Column>>>,
+    /// Index: ComponentId, Value: ArchetypeId of archetype with that component added
+    with: [Option<ArchetypeId>; MAX_COMPONENTS],
+    /// Index: ComponentId, Value: ArchetypeId of archetype with that component removed
+    without: [Option<ArchetypeId>; MAX_COMPONENTS],
 }
 
 impl Archetype {
@@ -50,7 +55,7 @@ impl Archetype {
 
                 for comp_id in 0..ComponentMask::CAPACITY {
                     let cid = ComponentId(comp_id);
-                    if component_mask.has_id(cid) {
+                    if component_mask.has_id(&cid) {
                         if let Some(meta) = registry.get_meta(cid) {
                             cols.push(Some(Box::new(Column::from_meta(meta))));
                         } else {
@@ -66,7 +71,51 @@ impl Archetype {
             component_ids: { component_mask.to_ids() },
             component_mask,
             entities: Vec::new(),
+            with: [None; MAX_COMPONENTS],
+            without: [None; MAX_COMPONENTS],
         }
+    }
+
+    pub(crate) fn with(&self, comp_id: &ComponentId) -> Option<ArchetypeId> {
+        self.with[comp_id.0]
+    }
+
+    pub(crate) fn set_with(&mut self, comp_id: &ComponentId, arch_id: ArchetypeId) {
+        self.with[comp_id.0] = Some(arch_id);
+    }
+
+    pub(crate) fn move_to(&mut self, from_row: usize, to_arch: &mut Archetype) -> Option<Entity> {
+        if from_row >= self.entities.len() {
+            panic!("Row index out of bounds");
+        }
+
+        // 1. Move components
+        for column_id in &to_arch.component_ids.clone() {
+            if !self.component_mask.has_id(&column_id) {
+                continue;
+            }
+
+            let from_column = self
+                .column_mut(&column_id)
+                .expect("Column should exist for component ID");
+            let to_column = to_arch
+                .column_mut(&column_id)
+                .expect("Column should exist for component ID");
+
+            from_column.swap_remove_into(from_row, to_column);
+        }
+
+        // 2. Move entity
+        to_arch.entities.push(self.entities[from_row]);
+        self.swap_remove_entities(from_row)
+    }
+
+    pub(crate) fn without(&self, comp_id: &ComponentId) -> Option<ArchetypeId> {
+        self.without[comp_id.0]
+    }
+
+    pub(crate) fn set_without(&mut self, comp_id: &ComponentId, arch_id: ArchetypeId) {
+        self.without[comp_id.0] = Some(arch_id);
     }
 
     pub fn len(&self) -> usize {
@@ -111,7 +160,11 @@ impl Archetype {
             column.swap_remove(row);
         }
 
-        // 2. Swap remove from entities
+        self.swap_remove_entities(row)
+    }
+
+    fn swap_remove_entities(&mut self, row: usize) -> Option<Entity> {
+        // Swap remove from entities
         // If we are removing the very last element, nothing moves to fill the gap.
         if row == self.entities.len() - 1 {
             self.entities.pop();

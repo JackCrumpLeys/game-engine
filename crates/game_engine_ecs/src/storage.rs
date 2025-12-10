@@ -16,6 +16,8 @@ pub struct TypeErasedSequence {
     drop_fn: unsafe fn(*mut u8),
     #[cfg(debug_assertions)]
     name: &'static str,
+    #[cfg(debug_assertions)]
+    dbg_fn: unsafe fn(*const u8) -> String,
 }
 #[cfg(debug_assertions)]
 impl std::fmt::Debug for TypeErasedSequence {
@@ -25,6 +27,17 @@ impl std::fmt::Debug for TypeErasedSequence {
             .field("capacity", &self.capacity)
             .field("layout", &self.layout)
             .field("name", &self.name)
+            .field("contents", &{
+                let mut vec = Vec::new();
+                unsafe {
+                    let mut current_ptr = self.ptr.as_ptr();
+                    for _ in 0..self.len {
+                        vec.push((self.dbg_fn)(current_ptr));
+                        current_ptr = current_ptr.add(self.layout.size());
+                    }
+                }
+                vec
+            })
             .finish()
     }
 }
@@ -39,6 +52,8 @@ impl TypeErasedSequence {
             drop_fn: meta.drop_fn,
             #[cfg(debug_assertions)]
             name: meta.name,
+            #[cfg(debug_assertions)]
+            dbg_fn: meta.dbg_fn,
         }
     }
 
@@ -53,6 +68,8 @@ impl TypeErasedSequence {
             drop_fn: |_ptr: *mut u8| {},
             #[cfg(debug_assertions)]
             name: "Dummy",
+            #[cfg(debug_assertions)]
+            dbg_fn: |_ptr: *const u8| "Dummy".to_string(),
         }
     }
 
@@ -138,7 +155,6 @@ impl TypeErasedSequence {
     }
 
     /// Removes the element at index by swapping it with the last element.
-    /// Returns true if an element was actually moved (i.e. we didn't remove the very last one).
     /// panics if index is out of bounds.
     pub fn swap_remove(&mut self, index: usize) {
         assert!(index < self.len);
@@ -160,6 +176,35 @@ impl TypeErasedSequence {
 
             // Note: We do NOT drop ptr_last. We moved its bits to ptr_at_index.
             // Ownership has effectively transferred to index.
+        }
+
+        self.len -= 1;
+    }
+
+    /// Copy data before removing it into other
+    /// Removes the element at index by swapping it with the last element.
+    /// panics if index is out of bounds.
+    pub fn swap_remove_into(&mut self, index: usize, other: &mut TypeErasedSequence) {
+        assert!(index < self.len);
+        assert_eq!(self.layout.size(), other.layout.size());
+
+        // 1. Calculate pointers
+        let size = self.layout.size();
+        unsafe {
+            let base_ptr = self.ptr.as_ptr();
+            let ptr_at_index = base_ptr.add(index * size);
+            let ptr_last = base_ptr.add((self.len - 1) * size);
+
+            // 2. Copy the item at `index` into `other`
+            other.reserve(1);
+            let dest_ptr = other.ptr.as_ptr().add(other.len * size);
+            ptr::copy_nonoverlapping(ptr_at_index, dest_ptr, size);
+            other.len += 1;
+
+            // 4. If it wasn't the last item, move the last item into this slot
+            if index != self.len - 1 {
+                ptr::copy_nonoverlapping(ptr_last, ptr_at_index, size);
+            }
         }
 
         self.len -= 1;
@@ -251,6 +296,7 @@ impl TypeErasedSequence {
     }
 }
 
+#[cfg_attr(debug_assertions, derive(Debug))]
 pub struct Column {
     inner: TypeErasedSequence,
     borrow_state: AtomicBorrow,
@@ -351,6 +397,20 @@ impl Column {
 
         self.inner.swap_remove(index);
         self.mutated_ticks.swap_remove(index);
+    }
+
+    /// Copy data before removing it into other
+    /// Removes the element at index by swapping it with the last element.
+    /// panics if index is out of bounds.
+    pub fn swap_remove_into(&mut self, index: usize, other: &mut Column) {
+        debug_assert!(self.len() == self.mutated_ticks.len());
+        debug_assert!(self.inner.layout.size() == other.inner.layout.size());
+
+        self.inner.swap_remove_into(index, &mut other.inner);
+
+        other
+            .mutated_ticks
+            .push(self.mutated_ticks.swap_remove(index));
     }
 
     pub fn reserve(&mut self, additional: usize) {

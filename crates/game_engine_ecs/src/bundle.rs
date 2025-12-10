@@ -44,7 +44,7 @@ macro_rules! impl_bundle {
             fn mask() -> ComponentMask {
                 let mut mask = ComponentMask::new();
                 $(
-                    mask.set_id($name::get_id());
+                    mask.set_id(&$name::get_id());
                 )*
                 mask
             }

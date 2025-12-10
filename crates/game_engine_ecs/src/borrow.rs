@@ -18,6 +18,7 @@ const COUNTER_MASK: usize = usize::MAX >> 1;
 ///  - `0b0_______...` the counter isn't mut borrowed, and currently borrowed
 ///  - `0b10000000...` the counter is mut borrowed
 ///  - `0b1_______...` the counter is mut borrowed, and some other thread is trying to borrow
+#[derive(Debug)]
 pub struct AtomicBorrow(AtomicUsize);
 
 impl Default for AtomicBorrow {

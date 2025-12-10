@@ -12,6 +12,7 @@ pub struct ComponentMeta {
     pub name: &'static str,
     pub layout: Layout,
     pub drop_fn: unsafe fn(*mut u8),
+    pub dbg_fn: unsafe fn(*const u8) -> String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
@@ -32,8 +33,13 @@ impl ComponentMask {
     }
 
     #[inline]
-    pub fn set_id(&mut self, id: ComponentId) {
+    pub fn set_id(&mut self, id: &ComponentId) {
         self.unsafe_set(id.0);
+    }
+
+    #[inline]
+    pub fn unset_id(&mut self, id: &ComponentId) {
+        self.unset(id.0);
     }
 
     #[inline]
@@ -44,7 +50,7 @@ impl ComponentMask {
     }
 
     #[inline]
-    pub const fn has_id(&self, id: ComponentId) -> bool {
+    pub const fn has_id(&self, id: &ComponentId) -> bool {
         self.has(id.0)
     }
 
@@ -73,6 +79,16 @@ impl ComponentMask {
             panic!("Index {index} out of bounds");
         }
         self.unsafe_set(index);
+    }
+
+    #[inline]
+    pub fn unset(&mut self, index: usize) {
+        if index >= Self::CAPACITY {
+            panic!("Index {index} out of bounds");
+        }
+        let word = index / 64;
+        let bit = index % 64;
+        self.bits[word] &= !(1 << bit);
     }
 
     #[inline(always)]
@@ -159,7 +175,7 @@ static NEXT_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 // Global allocator for component IDs
 pub fn allocate_component_id<T: 'static>() -> ComponentId {
     let id = NEXT_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    
+
     ComponentId(id)
 }
 
@@ -168,14 +184,24 @@ pub trait Component: 'static + Send + Sync + Sized + Debug {
         let name = std::any::type_name::<Self>();
         let layout = std::alloc::Layout::new::<Self>();
 
-        unsafe fn drop_shim<T>(ptr: *mut u8) { unsafe {
-            std::ptr::drop_in_place(ptr as *mut T);
-        }}
+        unsafe fn drop_shim<T>(ptr: *mut u8) {
+            unsafe {
+                std::ptr::drop_in_place(ptr as *mut T);
+            }
+        }
+
+        unsafe fn dbg_shim<T: Debug>(ptr: *const u8) -> String {
+            unsafe {
+                let reference = &*(ptr as *const T);
+                format!("{reference:?}")
+            }
+        }
 
         ComponentMeta {
             name,
             layout,
             drop_fn: drop_shim::<Self>,
+            dbg_fn: dbg_shim::<Self>,
         }
     }
 
@@ -281,7 +307,6 @@ impl ComponentRegistry {
 
 #[cfg(test)]
 mod tests {
-    
 
     use super::*;
 
@@ -331,7 +356,7 @@ mod tests {
 
         // Test Helpers
         let id = ComponentId(1);
-        assert!(mask.has_id(id));
+        assert!(mask.has_id(&id));
     }
     use std::any::TypeId;
 

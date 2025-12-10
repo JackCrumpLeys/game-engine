@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 smallvec.workspace = true
 game_engine_derive.workspace = true
+log.workspace = true
 
 [dev-dependencies]
 bevy_ecs = "0.17"

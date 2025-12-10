@@ -37,7 +37,7 @@ impl App {
         let cell = UnsafeWorldCell::new(&mut self.world);
         for system in &mut self.systems {
             unsafe {
-                system.run(cell);
+                system.run(&cell);
             }
         }
     }

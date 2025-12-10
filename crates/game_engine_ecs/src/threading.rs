@@ -93,6 +93,26 @@ impl<T: FromWorldThread> WorldThreadLocalStore<T> {
         slot.as_mut().unwrap()
     }
 
+    /// Access the thread-local data immutably.
+    /// If it doesn't exist for this thread, it is created using the World.
+    ///
+    /// panics if we are using too many threads (exceeding MAX_ECS_THREADS).
+    pub fn get_ref(&self, world: &World) -> &T {
+        let thread_id = ecs_thread_id().expect("Too many threads accessing ECS");
+
+        // SAFETY: ecs_thread_id() ensures this index is unique to this thread.
+        // No other thread can be accessing `slots[thread_id]` right now.
+        let cell = &self.slots[thread_id].inner;
+        let slot = unsafe { &mut *cell.get() };
+
+        // Lazy Init
+        if slot.is_none() {
+            *slot = Some(T::new_thread_local(thread_id, world));
+        }
+
+        slot.as_ref().unwrap()
+    }
+
     /// Iterates over all active slots.
     /// Useful for flushing command buffers or merging results.
     ///

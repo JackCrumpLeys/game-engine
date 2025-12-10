@@ -231,7 +231,7 @@ impl<T: Message> SystemParam for MessageWriter<'_, T> {
 
     unsafe fn get_param<'w>(
         _state: &'w mut Self::State,
-        u_world: UnsafeWorldCell<'w>,
+        u_world: &UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
         let world = unsafe { u_world.world_mut() };
 
@@ -256,7 +256,7 @@ impl<T: Message> SystemParam for MessageReader<'_, T> {
 
     unsafe fn get_param<'w>(
         read_from: &'w mut Self::State,
-        u_world: UnsafeWorldCell<'w>,
+        u_world: &UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
         let world = unsafe { u_world.world() };
 

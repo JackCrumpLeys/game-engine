@@ -1,5 +1,6 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use game_engine_derive::Component;
+use game_engine_ecs::query::Mut;
 use std::hint::black_box;
 
 // Adjust this crate name to match your Cargo.toml name
@@ -73,22 +74,22 @@ fn sys_rotate(mut query: game_engine_ecs::system::Query<&mut Rotation>) {
 }
 
 // System 4: Transform (Heavy-ish Math: Matrix from Pos + Rot)
-fn sys_update_transform(
-    mut query: game_engine_ecs::system::Query<(&Position, &Rotation, &mut TransformMatrix)>,
-) {
-    query.for_each(|(pos, rot, mut mat)| {
-        let c = rot.radians.cos();
-        let s = rot.radians.sin();
-        // 2D Rotation Matrix logic dumped into 4x4 array
-        mat.data[0] = c;
-        mat.data[1] = -s;
-        mat.data[4] = s;
-        mat.data[5] = c;
-        mat.data[12] = pos.x;
-        mat.data[13] = pos.y;
-        // Keep CPU busy
-        black_box(mat);
-    });
+fn sys_update_transform(mut query: Query<(&Position, &Rotation, &mut TransformMatrix)>) {
+    query.for_each(
+        |(pos, rot, mut mat): (&Position, &Rotation, Mut<'_, TransformMatrix>)| {
+            let c = rot.radians.cos();
+            let s = rot.radians.sin();
+            // 2D Rotation Matrix logic dumped into 4x4 array
+            mat.data[0] = c;
+            mat.data[1] = -s;
+            mat.data[4] = s;
+            mat.data[5] = c;
+            mat.data[12] = pos.x;
+            mat.data[13] = pos.y;
+            // Keep CPU busy
+            black_box(mat);
+        },
+    );
 }
 
 // System 5: Life Logic (Split logic: Regen adds, Poison removes)
@@ -316,7 +317,7 @@ impl App {
         let cell = UnsafeWorldCell::new(&mut self.world);
         for system in &mut self.systems {
             unsafe {
-                system.run(cell);
+                system.run(&cell);
             }
         }
     }

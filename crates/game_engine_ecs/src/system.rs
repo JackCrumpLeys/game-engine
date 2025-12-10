@@ -1,3 +1,4 @@
+pub mod command;
 pub mod function;
 
 use crate::archetype::ArchetypeId;
@@ -11,7 +12,6 @@ use std::ops::{Deref, DerefMut};
 
 /// Unsafe access to the world.
 /// This exists to allow splitting the borrow of World.
-#[derive(Clone, Copy)]
 pub struct UnsafeWorldCell<'w> {
     world: *mut World,
     _marker: std::marker::PhantomData<&'w mut World>,
@@ -90,7 +90,7 @@ pub trait System: Send + Sync + 'static {
     /// Runs the system.
     /// # Safety
     /// Scheduler must ensure no conflicts.
-    unsafe fn run(&mut self, world: UnsafeWorldCell);
+    unsafe fn run(&mut self, world: &UnsafeWorldCell);
 
     /// Returns the access requirements.
     /// Valid only after `init` is called.
@@ -124,7 +124,7 @@ pub trait SystemParam {
     /// if the scheduler logic is correct.
     unsafe fn get_param<'w>(
         state: &'w mut Self::State,
-        world: UnsafeWorldCell<'w>,
+        world: &'w UnsafeWorldCell<'w>,
     ) -> Self::Item<'w>;
 
     /// Called every frame IF `DYNAMIC` is true.
@@ -167,7 +167,7 @@ impl<T: Send + Sync + Default + 'static> SystemParam for Local<'_, T> {
 
     unsafe fn get_param<'w>(
         state: &'w mut Self::State,
-        _world: UnsafeWorldCell<'w>,
+        _world: &UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
         Local { inner: state }
     }
@@ -184,7 +184,7 @@ impl<T: Send + Sync + 'static> SystemParam for Res<'_, T> {
 
     unsafe fn get_param<'w>(
         _state: &'w mut Self::State,
-        world: UnsafeWorldCell<'w>,
+        world: &UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
         let world = unsafe { world.world() };
         world
@@ -205,7 +205,7 @@ impl<T: Send + Sync + 'static> SystemParam for ResMut<'_, T> {
 
     unsafe fn get_param<'w>(
         _state: &'w mut Self::State,
-        world: UnsafeWorldCell<'w>,
+        world: &UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
         // Safety: The scheduler ensures mutable access of this specific resource is safe.
         let world = unsafe { world.world_mut() };
@@ -219,7 +219,7 @@ impl<T: Send + Sync + 'static> SystemParam for ResMut<'_, T> {
 pub struct Query<'w, Q: QueryToken, F: Filter = ()> {
     // Maps Q -> Q::Persistent (The static data struct)
     query: &'w mut QueryInner<Q::Persistent, F::Persistent>,
-    world: UnsafeWorldCell<'w>,
+    world: &'w UnsafeWorldCell<'w>,
     tick: u32,
 }
 
@@ -247,7 +247,7 @@ impl<Q: QueryToken, F: Filter> SystemParam for Query<'_, Q, F> {
 
     unsafe fn get_param<'w>(
         state: &'w mut Self::State,
-        world: UnsafeWorldCell<'w>,
+        world: &'w UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
         let res = Query {
             query: &mut state.0,
@@ -283,10 +283,11 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
     /// for_each instead to have a more optimized hot loop iteration.
     pub fn iter(&mut self) -> QueryIter<'_, Q::View<'_>, F> {
         // Saftety at this point the column borrow checks have been done by the scheduler.
-        let world = unsafe { self.world.world_mut() };
-        debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
+        debug_assert!(
+            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
+        );
         // Explicitly pass the View and Filter types to the generic iter method
-        self.query.iter::<Q::View<'_>, F>(world, self.tick)
+        self.query.iter::<Q::View<'_>, F>(&self.world, self.tick)
     }
 
     /// runs a closure for each item in the query.
@@ -298,7 +299,7 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
         let world = unsafe { self.world.world_mut() };
         debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
         self.query
-            .for_each::<Q::View<'a>, F, Func>(world, func, self.tick)
+            .for_each::<Q::View<'a>, F, Func>(&self.world, func, self.tick)
     }
 
     /// get a specific entity's query item, if it exists.
@@ -309,7 +310,8 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
         let world = unsafe { self.world.world_mut() };
         debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
         // debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0 as usize);
-        self.query.get::<Q::View<'_>, F>(world, entity, self.tick)
+        self.query
+            .get::<Q::View<'_>, F>(&self.world, entity, self.tick)
     }
 }
 
@@ -329,7 +331,7 @@ macro_rules! impl_system_param_tuple {
                 )
             }
 
-            unsafe fn get_param<'w>(state: &'w mut Self::State, world: UnsafeWorldCell<'w>) -> Self::Item<'w> {
+            unsafe fn get_param<'w>(state: &'w mut Self::State, world: &'w UnsafeWorldCell<'w>) -> Self::Item<'w> {
                 #[allow(non_snake_case)]
                 let ($($name,)*) = state;
                 unsafe {

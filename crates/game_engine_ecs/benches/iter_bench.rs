@@ -89,9 +89,9 @@ fn heavy_compute_simd(c: &mut Criterion) {
 
     // ECS Benchmark
     group.bench_function("ECS", |b| {
-        let mut query = QueryState::<(&mut Position, &TransformMatrix)>::new(&mut world.registry);
+        let mut query = QueryState::<(&mut Position, &TransformMatrix)>::new(&mut world);
         b.iter(|| {
-            query_iteration(&mut world, &mut query);
+            query_iteration(&mut query);
         });
     });
 
@@ -185,9 +185,9 @@ fn archetype_fragmentation(c: &mut Criterion) {
     }
 
     group.bench_function("ECS: Fragmented Iteration", |b| {
-        let mut query = QueryState::<(&mut Position, &Velocity)>::new(&mut world.registry);
+        let mut query = QueryState::<(&mut Position, &Velocity)>::new(&mut world);
         b.iter(|| {
-            query.for_each(&mut world, |(mut pos, vel)| {
+            query.for_each(|(mut pos, vel)| {
                 pos.x += vel.dx;
                 black_box(pos);
             });
@@ -233,9 +233,9 @@ fn cache_locality_soa_vs_aos(c: &mut Criterion) {
 
     group.bench_function("ECS (SoA): Skip Bloat", |b| {
         // We ONLY request Position. The MeshData should be in a separate array.
-        let mut query = QueryState::<&mut Position>::new(&mut world.registry);
+        let mut query = QueryState::<&mut Position>::new(&mut world);
         b.iter(|| {
-            query.for_each(&mut world, |mut pos| {
+            query.for_each(|mut pos| {
                 pos.x += 1.0;
                 black_box(pos);
             });
@@ -278,9 +278,9 @@ fn filtering_logic(c: &mut Criterion) {
 
     group.bench_function("ECS: With<TagA>", |b| {
         // Should only iterate 10,000 entities
-        let mut query = QueryState::<&mut Position, With<TagA>>::new(&mut world.registry);
+        let mut query = QueryState::<&mut Position, With<TagA>>::new(&mut world);
         b.iter(|| {
-            query.for_each(&mut world, |mut pos| {
+            query.for_each(|mut pos| {
                 pos.x += 1.0;
                 black_box(pos);
             });
@@ -291,11 +291,8 @@ fn filtering_logic(c: &mut Criterion) {
 }
 
 #[inline(never)]
-fn query_iteration(
-    world: &mut World,
-    query: &mut QueryState<(&'static mut Position, &'static TransformMatrix)>,
-) {
-    query.for_each(world, |(mut pos, mat)| {
+fn query_iteration(query: &mut QueryState<(&'static mut Position, &'static TransformMatrix)>) {
+    query.for_each(|(mut pos, mat)| {
         // heavy math: Matrix multiplication simulation
         pos.x = pos.x * mat.m[0] + pos.y * mat.m[4] + pos.z * mat.m[8] + mat.m[12];
         pos.y = pos.x * mat.m[1] + pos.y * mat.m[5] + pos.z * mat.m[9] + mat.m[13];

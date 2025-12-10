@@ -1,12 +1,16 @@
+use log::warn;
 use smallvec::SmallVec;
 
 use crate::archetype::{Archetype, ArchetypeId};
 use crate::bundle::{Bundle, ManyRowBundle};
 use crate::component::{ComponentId, ComponentMask, ComponentMeta, ComponentRegistry};
 use crate::entity::{Entities, Entity};
+use crate::prelude::Component;
 use crate::query::{Filter, QueryState, QueryToken};
 use crate::resource::Resources;
 use crate::storage::TypeErasedSequence;
+use crate::system::UnsafeWorldCell;
+use crate::system::command::ThreadLocalCommandQueue;
 use crate::thread_entity_allocator::LocalThreadEntityAllocator;
 use crate::threading::{FromWorldThread, WorldThreadLocalStore};
 use std::ops::{Deref, Index, IndexMut};
@@ -31,7 +35,7 @@ impl EntityLocation {
 pub struct World {
     pub(crate) entities: Arc<RwLock<Entities>>, // Every thread will spin up a local allocator that syncs with
     // this
-    thread_local: ThreadLocalWorldData,
+    thread_local: WorldThreadLocalStore<ThreadLocalWorldData>,
     pub registry: ComponentRegistry,
     pub(crate) archetypes: ArchetypeStore,
     // Maps Entity Index -> Location
@@ -43,22 +47,70 @@ pub struct World {
     curent_frame: u32,
 }
 
-struct ThreadLocalWorldData {
-    entity_allocators: WorldThreadLocalStore<LocalThreadEntityAllocator>,
-    insert_buffers: WorldThreadLocalStore<EntityInsertBuffer>,
+// SAFETY:
+// 1. We move World between stages (Send).
+//    - This is safe because ownership transfer implies no one else is looking at it.
+unsafe impl Send for World {}
+
+// SAFETY:
+// 1. We share &World across threads (Sync).
+//    - Resources are protected by AtomicBorrow (runtime borrow checking).
+//    - Archetypes (Columns) are protected by AtomicBorrow (Query borrow checking).
+//    - ThreadLocals are protected by Thread ID isolation (Thread A never touches Thread B's slot).
+unsafe impl Sync for World {}
+
+pub struct ThreadLocalWorldData {
+    pub(crate) entity_allocator: LocalThreadEntityAllocator,
+    pub(crate) insert_buffer: EntityInsertBuffer,
+    pub(crate) command_queue: ThreadLocalCommandQueue,
+}
+
+impl<'a> CommandThreadLocalContext<'a> {
+    pub fn entity_allocator_mut(&mut self) -> &mut LocalThreadEntityAllocator {
+        self.entity_allocator
+    }
+
+    pub fn insert_buffer_mut(&mut self) -> &mut EntityInsertBuffer {
+        self.insert_buffer
+    }
 }
 
 impl ThreadLocalWorldData {
-    fn new() -> Self {
+    pub fn entity_allocator_mut(&mut self) -> &mut LocalThreadEntityAllocator {
+        &mut self.entity_allocator
+    }
+
+    pub fn insert_buffer_mut(&mut self) -> &mut EntityInsertBuffer {
+        &mut self.insert_buffer
+    }
+
+    pub fn entity_allocator(&self) -> &LocalThreadEntityAllocator {
+        &self.entity_allocator
+    }
+
+    pub fn insert_buffer(&self) -> &EntityInsertBuffer {
+        &self.insert_buffer
+    }
+}
+
+impl FromWorldThread for ThreadLocalWorldData {
+    fn new_thread_local(thread_id: usize, world: &World) -> Self {
         Self {
-            entity_allocators: WorldThreadLocalStore::new(),
-            insert_buffers: WorldThreadLocalStore::new(),
+            entity_allocator: LocalThreadEntityAllocator::new_thread_local(thread_id, world),
+            insert_buffer: EntityInsertBuffer::new_thread_local(thread_id, world),
+            command_queue: ThreadLocalCommandQueue::new_thread_local(thread_id, world),
         }
     }
 }
 
+/// Special view of thread-local data not involving the command queue.
+pub struct CommandThreadLocalContext<'a> {
+    pub entity_allocator: &'a mut LocalThreadEntityAllocator,
+    pub insert_buffer: &'a mut EntityInsertBuffer,
+}
+
 #[derive(Default)]
-struct EntityInsertBuffer {
+pub struct EntityInsertBuffer {
     /// The entity ids to add, in order of
     ///  * ComponentMask
     ///  * Row
@@ -116,7 +168,7 @@ impl EntityInsertBuffer {
         }
     }
 
-    fn insert_bundle<B: Bundle>(&mut self, entity: Entity, bundle: B) {
+    pub fn insert_bundle<B: Bundle>(&mut self, entity: Entity, bundle: B) {
         let mask = B::mask();
 
         let arch_index = self.get_or_create_archetype_buffer(mask);
@@ -152,6 +204,7 @@ impl EntityInsertBuffer {
     }
 }
 
+#[cfg_attr(debug_assertions, derive(Debug))]
 pub struct ArchetypeStore {
     inner: Vec<Archetype>,
     // The Lookup: Sorted by Mask
@@ -174,6 +227,7 @@ impl ArchetypeStore {
         }
     }
 
+    #[inline(always)]
     pub fn push(&mut self, archetype: Archetype) {
         let mask = archetype.component_mask;
         let id = archetype.id;
@@ -187,6 +241,81 @@ impl ArchetypeStore {
         self.lookup.insert(idx, (mask, id));
     }
 
+    #[inline(always)]
+    pub fn with(
+        &mut self,
+        from: ArchetypeId,
+        with: &ComponentId,
+        registry: &ComponentRegistry,
+    ) -> ArchetypeId {
+        match self.inner[from.0].with(with) {
+            Some(id) => id,
+            None => {
+                let mut new_mask = self.inner[from.0].component_mask;
+                new_mask.set_id(with);
+                let id = self.get_or_create_archetype(new_mask, registry);
+                self.inner[from.0].set_with(with, id);
+                self.inner[id.0].set_without(with, from);
+                id
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn without(
+        &mut self,
+        from: ArchetypeId,
+        without: &ComponentId,
+        registry: &ComponentRegistry,
+    ) -> ArchetypeId {
+        match self.inner[from.0].without(without) {
+            Some(id) => id,
+            None => {
+                let mut new_mask = self.inner[from.0].component_mask;
+                new_mask.unset_id(without);
+                let id = self.get_or_create_archetype(new_mask, registry);
+                self.inner[from.0].set_without(without, id);
+                self.inner[id.0].set_with(without, from);
+                id
+            }
+        }
+    }
+    #[inline(always)]
+    pub fn get_disjoint_archetypes(
+        &mut self,
+        idx1: usize,
+        idx2: usize,
+    ) -> (&mut Archetype, &mut Archetype) {
+        assert!(idx1 != idx2, "Indices must be different");
+
+        let (first, second) = if idx1 < idx2 {
+            let (left, right) = self.inner.split_at_mut(idx2);
+            (&mut left[idx1], &mut right[0])
+        } else {
+            let (left, right) = self.inner.split_at_mut(idx1);
+            (&mut right[0], &mut left[idx2])
+        };
+
+        (first, second)
+    }
+
+    #[inline(always)]
+    fn get_or_create_archetype(
+        &mut self,
+        component_mask: ComponentMask,
+        registry: &ComponentRegistry,
+    ) -> ArchetypeId {
+        if let Some(id) = self.get_id(&component_mask) {
+            return id;
+        }
+
+        let id = ArchetypeId(self.len());
+        let archetype = Archetype::new(id, component_mask, registry);
+        self.push(archetype);
+        id
+    }
+
+    #[inline(always)]
     pub fn get_id(&self, mask: &ComponentMask) -> Option<ArchetypeId> {
         // Binary search is extremely fast on small-medium datasets
         self.lookup
@@ -196,6 +325,7 @@ impl ArchetypeStore {
     }
 
     /// Gets an iterator over archetypes added since the given ArchetypeId.
+    #[inline(always)]
     pub fn since(&self, last_seen: ArchetypeId) -> impl Iterator<Item = &Archetype> {
         self.inner.iter().skip(last_seen.0)
     }
@@ -235,7 +365,7 @@ impl World {
     pub fn new() -> Self {
         World {
             entities: Arc::new(RwLock::new(Entities::new())),
-            thread_local: ThreadLocalWorldData::new(),
+            thread_local: WorldThreadLocalStore::new(),
             registry: ComponentRegistry::new(),
             archetypes: ArchetypeStore::new(),
             entity_index: Vec::new(),
@@ -247,7 +377,7 @@ impl World {
 
     /// Get your thread-local entity allocator.
     pub fn entity_allocator(&self) -> &mut LocalThreadEntityAllocator {
-        self.thread_local.entity_allocators.get(self)
+        &mut self.thread_local.get(self).entity_allocator
     }
 
     /// Read entities storage.
@@ -259,7 +389,7 @@ impl World {
 
     /// Spawns a new entity with the given bundle of components.
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
-        let ent = self.entity_allocator().alloc(self.current_tick);
+        let ent = self.entity_allocator().alloc();
 
         self.spawn_with_id(ent, bundle);
 
@@ -269,7 +399,7 @@ impl World {
     /// Spawn deferred: Spawns an entity with the given bundle, deferring the actual insertion
     /// until later.
     pub fn spawn_deferred<B: Bundle>(&self, bundle: B) -> Entity {
-        let ent = self.entity_allocator().alloc(self.current_tick);
+        let ent = self.entity_allocator().alloc();
 
         self.spawn_deferred_with_id(ent, bundle);
 
@@ -282,7 +412,9 @@ impl World {
         self.registry.bulk_manual_register(&real_order, &metas);
 
         let mask = B::mask();
-        let arch_id = self.get_or_create_archetype(mask);
+        let arch_id = self
+            .archetypes
+            .get_or_create_archetype(mask, &self.registry);
         let arch = &mut self.archetypes[arch_id];
         let row = arch.push_entity(entity);
 
@@ -331,12 +463,12 @@ impl World {
         self.registry.bulk_manual_register(&real_order, &metas);
         real_order.sort_unstable();
 
-        let arch_id = self.get_or_create_archetype(mask);
+        let arch_id = self
+            .archetypes
+            .get_or_create_archetype(mask, &self.registry);
         let count = bundles.len();
 
-        let entities = self
-            .entity_allocator()
-            .alloc_batch(self.current_tick, count);
+        let entities = self.entity_allocator().alloc_batch(count);
 
         let arch = &mut self.archetypes[arch_id];
         let start_row = arch.len();
@@ -404,69 +536,223 @@ impl World {
     pub fn flush(&mut self) {
         let buffers = Vec::from_iter(
             self.thread_local
-                .insert_buffers
                 .iter_mut()
+                .map(|data| &mut data.insert_buffer)
                 .filter(|b| !b.is_empty())
                 .map(std::mem::take),
         );
-        for mut buffer in buffers {
-            let mut cols = buffer.drain_cols();
+        for buffer in buffers {
+            self.flush_insert_buffer(buffer);
+        }
 
-            for (i, mut src_cols) in cols.drain(..).enumerate() {
-                let comp_ids = &mut buffer.comp_ids[i];
-                let metas = &buffer.comp_metas[i];
-                self.registry.bulk_manual_register(comp_ids, metas);
+        let unsafe_world = UnsafeWorldCell::new(self);
+        // We do this in an unsafe block because we are manually ensuring
+        // that we are accsesing thread local data and the rest of the world separately.
+        unsafe {
+            let datas = unsafe_world.world_mut().thread_local.iter_mut();
+            for data in datas {
+                data.command_queue.apply(unsafe_world.world_mut());
+            }
+        }
+    }
 
-                let mask = buffer.masks[i];
-                let arch_id = self.get_or_create_archetype(mask);
-                let entities = &buffer.ids[i];
+    fn flush_insert_buffer(&mut self, mut buffer: EntityInsertBuffer) {
+        let mut cols = buffer.drain_cols();
 
-                let arch = &mut self.archetypes[arch_id];
-                let start_row = arch.len();
+        for (i, mut src_cols) in cols.drain(..).enumerate() {
+            let comp_ids = &mut buffer.comp_ids[i];
+            let metas = &buffer.comp_metas[i];
+            self.registry.bulk_manual_register(comp_ids, metas);
 
-                for (src_seq, &comp_id) in src_cols.drain(..).zip(comp_ids.iter()) {
-                    let dest_col = arch
-                        .column_mut(&comp_id)
-                        .expect("Archetype created from mask should have matching columns");
+            let mask = buffer.masks[i];
+            let arch_id = self
+                .archetypes
+                .get_or_create_archetype(mask, &self.registry);
+            let entities = &buffer.ids[i];
 
-                    dest_col.set_tick(self.current_tick);
-                    dest_col.append(src_seq);
-                }
+            let arch = &mut self.archetypes[arch_id];
+            let start_row = arch.len();
 
-                let mut max_idx = 0;
-                for &e in entities {
-                    max_idx = max_idx.max(e.index() as usize);
-                }
-                if max_idx >= self.entity_index.len() {
-                    self.entity_index.resize(max_idx + 1, None);
-                }
+            for (src_seq, &comp_id) in src_cols.drain(..).zip(comp_ids.iter()) {
+                let dest_col = arch
+                    .column_mut(&comp_id)
+                    .expect("Archetype created from mask should have matching columns");
 
-                let mut entities_guard = self.entities.write().unwrap();
-                arch.push_entities(entities);
-
-                for (i, &entity) in entities.iter().enumerate() {
-                    let row = start_row + i;
-                    self.entity_index[entity.index() as usize] = Some(EntityLocation {
-                        archetype_id: arch_id,
-                        row,
-                    });
-                    entities_guard.initialize(entity);
-                }
+                dest_col.set_tick(self.current_tick);
+                dest_col.append(src_seq);
             }
 
-            buffer.clear();
+            let mut max_idx = 0;
+            for &e in entities {
+                max_idx = max_idx.max(e.index() as usize);
+            }
+            if max_idx >= self.entity_index.len() {
+                self.entity_index.resize(max_idx + 1, None);
+            }
+
+            let mut entities_guard = self.entities.write().unwrap();
+            arch.push_entities(entities);
+
+            for (i, &entity) in entities.iter().enumerate() {
+                let row = start_row + i;
+                self.entity_index[entity.index() as usize] = Some(EntityLocation {
+                    archetype_id: arch_id,
+                    row,
+                });
+                entities_guard.initialize(entity);
+            }
         }
+
+        buffer.clear();
     }
     /// Spawns an entity with the given bundle, deferring the actual insertion until later.
     pub fn spawn_deferred_with_id<B: Bundle>(&self, id: Entity, bundle: B) {
         self.thread_local
-            .insert_buffers
             .get(self)
+            .insert_buffer
             .insert_bundle(id, bundle);
     }
 
+    /// Attempts to insert a component into an existing entity.
+    /// silently returns if state is invalid.
+    pub fn insert_component<T: Component>(&mut self, entity: Entity, component: T) {
+        if !(self.entities().is_alive(entity) && self.entities().is_initialized(entity)) {
+            return;
+        }
+
+        let loc = match self.entity_index[entity.index() as usize] {
+            Some(loc) => loc,
+            None => {
+                warn!(
+                    "Attempted to insert component into non-existent or uninitialized entity {entity:?}"
+                );
+                return;
+            }
+        };
+
+        if !self.entities().is_initialized(entity) {
+            warn!("Attempted to insert component into uninitialized entity {entity:?}");
+            return;
+        }
+
+        let new_id = self.archetypes.with(
+            loc.archetype_id,
+            &self.registry.register::<T>(),
+            &self.registry,
+        );
+
+        // If the archetype ID didn't change, the entity
+        // didn't have the component. We must return here, otherwise
+        // get_disjoint_archetypes will panic (indices must be different).
+        if new_id == loc.archetype_id {
+            return;
+        }
+
+        let (from_arch, to_arch) = self
+            .archetypes
+            .get_disjoint_archetypes(loc.archetype_id.0, new_id.0);
+
+        // Move entity data
+        // move_to transfers matching components to to_arch.
+        // It performs a swap-remove on from_arch.
+        // it pushes the entity to to_arch.
+        // It returns the entity that was swapped into the hole in from_arch (if any).
+        let mabye_moved = from_arch.move_to(loc.row, to_arch);
+
+        // Update the index of the entity that filled the hole in the old archetype
+        if let Some(moved) = mabye_moved {
+            let ent_loc = self.entity_index[moved.index() as usize]
+                .as_mut()
+                .expect("Moved entity should have a location");
+            ent_loc.row = loc.row;
+        };
+        let col = self.archetypes[new_id]
+            .column_mut(&T::get_id())
+            .expect("New archetype should have the new component column");
+        col.set_tick(self.current_tick);
+
+        // SAFETY: We are accsesing T::get_id() column which matches type T
+        // push the new component data
+        unsafe { col.push(component) };
+
+        // Update the index of the target entity (it is now at the end of new_arch)
+        self.entity_index[entity.index() as usize]
+            .as_mut()
+            .expect("ideally we have checked above and this can never happen")
+            .archetype_id = new_id;
+        self.entity_index[entity.index() as usize]
+            .as_mut()
+            .expect("ideally we have checked above and this can never happen")
+            .row = self.archetypes[new_id].len() - 1;
+    }
+
+    pub fn remove_component<T: Component>(&mut self, entity: Entity) {
+        // Liveness checks
+        if !(self.entities().is_alive(entity) && self.entities().is_initialized(entity)) {
+            warn!(
+                "Attempted to remove component from non-existent or uninitialized entity {entity:?}"
+            );
+            return;
+        }
+
+        // Location lookup
+        let loc = match self.entity_index[entity.index() as usize] {
+            Some(loc) => loc,
+            None => {
+                warn!(
+                    "Attempted to remove component from non-existent or uninitialized entity {entity:?}"
+                );
+                return;
+            }
+        };
+
+        // Determine target archetype
+        // We use register so that if the id is new to this world it is registered. If the component ID isn't in the mask,
+        // ArchetypeStore::without typically returns the same ID.
+        let new_id = self.archetypes.without(
+            loc.archetype_id,
+            &self.registry.register::<T>(),
+            &self.registry,
+        );
+
+        // If the archetype ID didn't change, the entity
+        // didn't have the component. We must return here, otherwise
+        // get_disjoint_archetypes will panic (indices must be different).
+        if new_id == loc.archetype_id {
+            return;
+        }
+
+        // Get mutable references to both archetypes
+        let (from_arch, to_arch) = self
+            .archetypes
+            .get_disjoint_archetypes(loc.archetype_id.0, new_id.0);
+
+        // Move entity data
+        // move_to transfers matching components to to_arch.
+        // It performs a swap-remove on from_arch.
+        // it pushes the entity to to_arch.
+        // It returns the entity that was swapped into the hole in from_arch (if any).
+        let maybe_swapped = from_arch.move_to(loc.row, to_arch);
+
+        // Update the index of the entity that filled the hole in the old archetype
+        if let Some(swapped) = maybe_swapped {
+            let ent_loc = self.entity_index[swapped.index() as usize]
+                .as_mut()
+                .expect("Swapped entity should have a location");
+            ent_loc.row = loc.row;
+        };
+
+        // Update the index of the target entity (it is now at the end of new_arch)
+        let target_loc = self.entity_index[entity.index() as usize]
+            .as_mut()
+            .expect("Target entity should have a location");
+
+        target_loc.archetype_id = new_id;
+        target_loc.row = self.archetypes[new_id].len() - 1;
+    }
+
     pub fn query<Q: QueryToken, F: Filter>(&mut self) -> QueryState<Q, F> {
-        QueryState::new(&mut self.registry)
+        QueryState::new(self)
     }
 
     pub fn resources_mut(&mut self) -> &mut Resources {
@@ -522,21 +808,22 @@ impl World {
         true
     }
 
-    fn get_or_create_archetype(&mut self, component_mask: ComponentMask) -> ArchetypeId {
-        if let Some(id) = self.archetypes.get_id(&component_mask) {
-            return id;
-        }
-
-        let id = ArchetypeId(self.archetypes.len());
-        let archetype = Archetype::new(id, component_mask, &self.registry);
-        self.archetypes.push(archetype);
-        id
-    }
-
     /// The system tick, increments every time `increment_tick` is called.
     /// Used for change detection.
     pub fn tick(&self) -> u32 {
         self.current_tick
+    }
+
+    pub(crate) fn thread_local(&self, thread_id: usize) -> &ThreadLocalWorldData {
+        self.thread_local.get_ref(self)
+    }
+
+    pub fn thread_local_mut(&self) -> &mut ThreadLocalWorldData {
+        self.thread_local.get(self)
+    }
+
+    pub fn command_queue_mut(&self) -> &mut ThreadLocalCommandQueue {
+        &mut self.thread_local_mut().command_queue
     }
 }
 
@@ -564,6 +851,7 @@ fn test_world_spawn_despawn() {
 #[cfg(test)]
 mod world_tests {
     use crate::prelude::*;
+    use crate::query::QueryState;
     use crate::world::World;
 
     #[derive(Debug, PartialEq, Default, Clone, Copy)]
@@ -611,8 +899,8 @@ mod world_tests {
         assert!(world.entities().len() >= count);
 
         // Assert: Data Integrity via Query (The real truth source)
-        let mut query = crate::query::QueryState::<(&Pos, &Vel)>::new(&mut world.registry);
-        assert_eq!(query.iter(&mut world).count(), count);
+        let mut query = QueryState::<(&Pos, &Vel)>::new(&mut world);
+        assert_eq!(query.iter().count(), count);
     }
 
     #[test]
@@ -647,17 +935,17 @@ mod world_tests {
         let expected_user_count = batch_size + 2;
 
         // Check actual live entities in query
-        let mut q_all = crate::query::QueryState::<Entity>::new(&mut world.registry);
-        assert_eq!(q_all.iter(&mut world).count(), expected_user_count);
+        let mut q_all = QueryState::<Entity>::new(&mut world);
+        assert_eq!(q_all.iter().count(), expected_user_count);
 
         // Check Entity Allocator State
         // We assert >= because the allocator holds reserved IDs
         assert!(world.entities().len() >= expected_user_count);
 
         // Data Checks...
-        let mut q_health = crate::query::QueryState::<&Health>::new(&mut world.registry);
-        assert_eq!(q_health.get(&mut world, e1).unwrap().0, 100.0);
-        assert_eq!(q_health.get(&mut world, e2).unwrap().0, 50.0);
+        let mut q_health = QueryState::<&Health>::new(&mut world);
+        assert_eq!(q_health.get(e1).unwrap().0, 100.0);
+        assert_eq!(q_health.get(e2).unwrap().0, 50.0);
     }
 
     #[test]
@@ -676,8 +964,8 @@ mod world_tests {
 
         assert_eq!(entities.len(), count);
 
-        let mut query = crate::query::QueryState::<&Marker>::new(&mut world.registry);
-        assert_eq!(query.iter(&mut world).count(), count);
+        let mut query = QueryState::<&Marker>::new(&mut world);
+        assert_eq!(query.iter().count(), count);
     }
 
     #[test]
@@ -719,8 +1007,8 @@ mod world_tests {
 
         world.spawn_batch(batch);
 
-        let mut query = crate::query::QueryState::<(&Pos, &Vel)>::new(&mut world.registry);
-        for (pos, vel) in query.iter(&mut world) {
+        let mut query = QueryState::<(&Pos, &Vel)>::new(&mut world);
+        for (pos, vel) in query.iter() {
             // Pos.x should be 100 (from 2nd slot in tuple)
             assert_eq!(pos.x, 100.0);
             // Vel.x should be index (from 1st slot in tuple)
@@ -813,7 +1101,7 @@ mod world_tests {
         // Verify Data
         let mut query = world.query::<(&Pos, &Tag), ()>();
         let mut seen = 0;
-        query.for_each(&mut world, |(pos, tag)| {
+        query.for_each(|(pos, tag)| {
             assert_eq!(pos.x, tag.0 as f32);
             seen += 1;
         });
@@ -845,7 +1133,7 @@ mod world_tests {
         world.spawn_batch(batch);
 
         let mut query = world.query::<(&Pos, &Vel), ()>();
-        query.for_each(&mut world, |(pos, vel)| {
+        query.for_each(|(pos, vel)| {
             assert_eq!(pos.x, 100.0); // Should be the Pos value
             assert_eq!(vel.x, vel.y); // Should be the Vel value
         });
@@ -873,7 +1161,7 @@ mod world_tests {
 
         // Query should NOT see it
         let mut q = world.query::<&Pos, ()>();
-        let count = q.iter(&mut world).count();
+        let count = q.iter().count();
         assert_eq!(count, 0);
 
         // 2. Flush
@@ -886,7 +1174,7 @@ mod world_tests {
         // Query SHOULD see it
         let mut q = world.query::<&Pos, ()>();
         let mut found = false;
-        q.for_each(&mut world, |pos| {
+        q.for_each(|pos| {
             assert_eq!(pos.x, 5.0);
             found = true;
         });
@@ -905,10 +1193,10 @@ mod world_tests {
         world.flush();
 
         let mut q_pos = world.query::<&Pos, ()>();
-        assert_eq!(q_pos.iter(&mut world).count(), 2);
+        assert_eq!(q_pos.iter().count(), 2);
 
         let mut q_vel = world.query::<&Vel, ()>();
-        assert_eq!(q_vel.iter(&mut world).count(), 1);
+        assert_eq!(q_vel.iter().count(), 1);
 
         // Ensure data integrity
         let loc_a1 = world.entity_location(e_a1).unwrap();
@@ -927,13 +1215,13 @@ mod world_tests {
         world.flush();
 
         let mut q = world.query::<&Tag, ()>();
-        assert_eq!(q.iter(&mut world).count(), 1);
+        assert_eq!(q.iter().count(), 1);
 
         world.spawn_deferred((Tag(2),));
         world.flush();
 
         let mut q = world.query::<&Tag, ()>();
-        assert_eq!(q.iter(&mut world).count(), 2);
+        assert_eq!(q.iter().count(), 2);
     }
 
     // ========================================================================
@@ -966,5 +1254,240 @@ mod world_tests {
 
         let res = world.resources().get::<u32>().unwrap();
         assert_eq!(*res, 150);
+    }
+
+    #[test]
+    fn test_insert_component_basic() {
+        let mut world = World::new();
+
+        // 1. Spawn entity with just Pos
+        let e = world.spawn((Pos { x: 10.0, y: 20.0 },));
+
+        // 2. Insert Vel
+        world.insert_component(e, Vel { x: 1.0, y: 0.0 });
+
+        // 3. Verify both components exist and data is correct
+        let mut query = world.query::<(&Pos, &Vel), ()>();
+        let (pos, vel) = *query.get(e).expect("Entity should have both components");
+
+        assert_eq!(pos.x, 10.0);
+        assert_eq!(pos.y, 20.0);
+        assert_eq!(vel.x, 1.0);
+    }
+
+    #[test]
+    fn test_insert_transitions_archetype() {
+        let mut world = World::new();
+
+        let e = world.spawn((Pos { x: 0.0, y: 0.0 },));
+        let loc_old = world.entity_location(e).unwrap();
+
+        world.insert_component(e, Vel { x: 1.0, y: 1.0 });
+        let loc_new = world.entity_location(e).unwrap();
+
+        // Archetype ID should change because the component signature changed
+        assert_ne!(loc_old.archetype_id, loc_new.archetype_id);
+    }
+
+    #[test]
+    fn test_insert_preserves_other_entities_location_updates() {
+        // This is the critical test for the "maybe_moved" logic in insert_component.
+        // When an entity moves out of an archetype, the last entity in that archetype
+        // is swapped into the gap. We must ensure that the swapped entity's location
+        // is updated in the entity_index.
+
+        let mut world = World::new();
+
+        // Spawn E1 first (Row 0)
+        let e1 = world.spawn((Pos { x: 1.0, y: 1.0 },));
+        // Spawn E2 second (Row 1) - Same Archetype
+        let e2 = world.spawn((Pos { x: 2.0, y: 2.0 },));
+
+        // Insert component into E1.
+        // E1 moves to a new archetype.
+        // E2 should move from Row 1 to Row 0 in the old archetype to fill the gap.
+        world.insert_component(e1, Vel { x: 0.0, y: 0.0 });
+
+        // Verify E1 has both
+        {
+            let mut q = world.query::<(&Pos, &Vel), ()>();
+            assert!(q.get(e1).is_some());
+        }
+
+        // Verify E2 is still accessible and has correct data.
+        // If the location index wasn't updated, looking up E2 might point to Row 1,
+        // which is now out of bounds (len is 1).
+        {
+            let mut q = world.query::<&Pos, ()>();
+            let pos = q.get(e2).expect("E2 should still exist and be accessible");
+            assert_eq!(pos.x, 2.0);
+        }
+
+        // Verify internal location state explicitly
+        let loc_e2 = world.entity_location(e2).unwrap();
+        assert_eq!(loc_e2.row, 0, "E2 should have been swapped to row 0");
+    }
+
+    #[test]
+    fn test_insert_into_empty_entity() {
+        let mut world = World::new();
+        // Spawn empty
+        let e = world.spawn(());
+
+        world.insert_component(e, Health(100.0));
+
+        let mut q = world.query::<&Health, ()>();
+        assert_eq!(q.get(e).unwrap().0, 100.0);
+    }
+
+    #[test]
+    fn test_insert_into_despawned_entity() {
+        let mut world = World::new();
+        let e = world.spawn((Pos { x: 10.0, y: 10.0 },));
+
+        world.despawn(e);
+
+        // Attempt insert - should log warn and return (not panic)
+        world.insert_component(e, Vel { x: 0.0, y: 0.0 });
+
+        // Verify it didn't somehow resurrect the entity or create a ghost archetype
+        assert!(!world.entities().is_alive(e));
+    }
+
+    #[test]
+    fn test_insert_into_uninitialized_deferred_entity() {
+        let mut world = World::new();
+
+        // Spawn deferred (allocated ID, but not in archetype yet)
+        let e = world.spawn_deferred((Pos { x: 10.0, y: 10.0 },));
+
+        // Attempt insert before flush
+        // logic: if !self.entities().is_initialized(entity) { return; }
+        world.insert_component(e, Vel { x: 0.0, y: 0.0 });
+
+        world.flush();
+
+        // The insert should have been ignored.
+        // If it succeeded, the entity would have Vel. If ignored, only Pos.
+
+        let mut q_vel = world.query::<&Vel, ()>();
+        assert!(
+            q_vel.get(e).is_none(),
+            "Component insertion should be ignored on uninitialized entities"
+        );
+
+        let mut q_pos = world.query::<&Pos, ()>();
+        assert!(
+            q_pos.get(e).is_some(),
+            "Original deferred component should exist"
+        );
+    }
+
+    #[test]
+    fn test_remove_component_basic() {
+        let mut world = World::new();
+
+        // Spawn with Pos and Vel
+        let e = world.spawn((Pos { x: 10.0, y: 10.0 }, Vel { x: 1.0, y: 0.0 }));
+
+        // Remove Vel
+        world.remove_component::<Vel>(e);
+
+        // Check Pos still exists and data is intact
+        let mut q_pos = world.query::<&Pos, ()>();
+        assert_eq!(q_pos.get(e).unwrap().x, 10.0);
+
+        // Check Vel is gone
+        let mut q_vel = world.query::<&Vel, ()>();
+        assert!(q_vel.get(e).is_none());
+
+        // Check Archetype changed
+        let loc = world.entity_location(e).unwrap();
+        // Since Vel is gone, it should just be the archetype for {Pos}
+        // (Assuming implementation details of Archetype creation, checking ID change is enough)
+        assert!(
+            world.archetypes[loc.archetype_id]
+                .component_mask
+                .has_id(&Pos::get_id())
+        );
+        assert!(
+            !world.archetypes[loc.archetype_id]
+                .component_mask
+                .has_id(&Vel::get_id())
+        );
+    }
+
+    #[test]
+    fn test_remove_component_swaps_rows_correctly() {
+        // This tests the "maybe_swapped" logic.
+        // When we remove a component from an entity, it leaves its current archetype.
+        // To keep the archetype dense, the last entity in that archetype is swapped into the gap.
+        // We must ensure that the swapped entity's location record is updated.
+
+        let mut world = World::new();
+
+        // Spawn E1 (Row 0)
+        let e1 = world.spawn((Pos { x: 1.0, y: 1.0 }, Vel { x: 0.0, y: 0.0 }));
+        // Spawn E2 (Row 1) - Same Archetype
+        let e2 = world.spawn((Pos { x: 2.0, y: 2.0 }, Vel { x: 0.0, y: 0.0 }));
+
+        // Remove Vel from E1.
+        // E1 moves to Arch(Pos).
+        // E2 should swap-remove into Row 0 of Arch(Pos, Vel).
+        world.remove_component::<Vel>(e1);
+
+        // 1. Verify E1 moved
+        let loc_e1 = world.entity_location(e1).unwrap();
+        assert!(
+            !world.archetypes[loc_e1.archetype_id]
+                .component_mask
+                .has_id(&Vel::get_id())
+        );
+
+        // 2. Verify E2 is still accessible and has correct data
+        // If the swap logic failed, E2's location would still point to Row 1, which is now invalid/empty.
+        {
+            let mut q = world.query::<&Pos, ()>();
+            let pos_e2 = q.get(e2).expect("E2 should still exist");
+            assert_eq!(pos_e2.x, 2.0);
+        }
+
+        // 3. Verify internal location index for E2
+        let loc_e2 = world.entity_location(e2).unwrap();
+        assert_eq!(
+            loc_e2.row, 0,
+            "E2 should have moved to row 0 to fill the gap"
+        );
+    }
+
+    #[test]
+    fn test_remove_non_existent_component() {
+        let mut world = World::new();
+
+        // Entity only has Pos
+        let e = world.spawn((Pos { x: 10.0, y: 10.0 },));
+        let initial_loc = world.entity_location(e).unwrap();
+
+        // Try to remove Vel (which it doesn't have)
+        world.remove_component::<Vel>(e);
+
+        // Should be no change
+        let final_loc = world.entity_location(e).unwrap();
+        assert_eq!(initial_loc.archetype_id, final_loc.archetype_id);
+        assert_eq!(initial_loc.row, final_loc.row);
+
+        // Data check
+        let mut q = world.query::<&Pos, ()>();
+        assert!(q.get(e).is_some());
+    }
+
+    #[test]
+    fn test_remove_from_dead_entity() {
+        let mut world = World::new();
+        let e = world.spawn((Pos { x: 0.0, y: 0.0 },));
+        world.despawn(e);
+
+        // Should simply return/warn, not panic
+        world.remove_component::<Pos>(e);
     }
 }

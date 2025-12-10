@@ -1263,6 +1263,7 @@ dependencies = [
  "bevy_ecs",
  "criterion",
  "game_engine_derive",
+ "log",
  "smallvec 2.0.0-alpha.12",
 ]
 
