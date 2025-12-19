@@ -3,6 +3,8 @@
 pub mod components;
 pub mod packet;
 mod pass;
+mod pipeline;
+mod shaders;
 
 use std::sync::Arc;
 
@@ -277,15 +279,10 @@ impl ApplicationHandler for RenderManager {
                     Some(rcx) => {
                         // Handle rendering here
                         if let Some(snapshot_pair) = &mut self.snapshot_pair {
-                            // Interpolate between snapshots
-                            let interpolated_snapshot = snapshot_pair.interpolate();
-
-                            // Render the interpolated snapshot
-                            rcx.pass_manager.load_packet(&interpolated_snapshot);
                             // Finally do pass
                             match rcx.pass_manager.do_pass(
+                                &snapshot_pair,
                                 rcx.swapchain.clone(),
-                                rcx.device.clone(),
                                 rcx.queue.clone(),
                             ) {
                                 Ok(r) => match r {

@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 spirv-std.workspace = true
 bytemuck.workspace = true
+game_engine_derive.workspace = true

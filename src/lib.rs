@@ -1,8 +1,10 @@
 pub mod render;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use game_engine_ecs::world::World;
+use game_engine_shaders_types::packet::GpuTrianglePacket;
+use game_engine_shaders_types::vec2;
 use winit::{
     event_loop::{ControlFlow, EventLoop},
     platform::pump_events::EventLoopExtPumpEvents,
@@ -10,7 +12,7 @@ use winit::{
 
 use crate::render::{
     RenderManager,
-    packet::{RenderPacket, VulVertex},
+    packet::{RenderPacket, RenderPacketContents},
 };
 
 // Our main application struct
@@ -38,12 +40,25 @@ impl GameApp {
 
         // Continuously runs the event loop, ideal for games.
         event_loop.set_control_flow(ControlFlow::Poll);
+        let mut time_last_update = Instant::now();
+
+        let mut time_fps_report = Instant::now();
+        let mut frame_count = 0u32;
+
+        self.update()?;
+        self.update_render_world()?;
         loop {
-            // i += 1;
-            // if i % 20 == 0 {
-            self.update()?;
-            self.update_render_world()?;
-            // }
+            if time_last_update.elapsed() >= Duration::from_millis(500) {
+                self.update()?;
+                self.update_render_world()?;
+                time_last_update = Instant::now();
+            }
+            if time_fps_report.elapsed() >= Duration::from_secs(2) {
+                let fps = frame_count as f64 / time_fps_report.elapsed().as_secs_f64();
+                log::info!("FPS: {:.2}", fps);
+                frame_count = 0;
+                time_fps_report = Instant::now();
+            }
             match event_loop
                 .pump_app_events(Some(Duration::from_millis(5)), &mut self.render_manager)
             {
@@ -51,6 +66,7 @@ impl GameApp {
                 winit::platform::pump_events::PumpStatus::Exit(_) => break,
             };
             self.render_manager.window()?.request_redraw();
+            frame_count += 1;
         }
         Ok(())
     }
@@ -59,22 +75,22 @@ impl GameApp {
         // Update game logic here
 
         if self.dir {
-            self.x.0 += 0.01;
+            self.x.0 += 0.1;
             if self.x.0 >= 0.5 {
                 self.dir = false;
             }
 
-            self.x.1 -= 0.01;
+            self.x.1 -= 0.1;
             if self.x.1 <= -0.5 {
                 self.dir = false;
             }
         } else {
-            self.x.0 -= 0.01;
+            self.x.0 -= 0.1;
             if self.x.0 <= -0.5 {
                 self.dir = true;
             }
 
-            self.x.1 += 0.01;
+            self.x.1 += 0.1;
             if self.x.1 >= 0.5 {
                 self.dir = true;
             }
@@ -84,12 +100,11 @@ impl GameApp {
     }
 
     fn update_render_world(&mut self) -> GameEngineResult<()> {
-        self.render_manager
-            .push_snapshot(RenderPacket::new().with_vertex_buffer([
-                VulVertex::new(self.x.0, -0.5),
-                VulVertex::new(0.0, 0.5),
-                VulVertex::new(self.x.1, -0.5),
-            ]));
+        let mut packet = RenderPacket::new();
+        packet.triangles = RenderPacketContents::new_all_data(vec![GpuTrianglePacket {
+            vertices: [vec2(self.x.0, -0.5), vec2(0.0, 0.5), vec2(self.x.1, -0.5)],
+        }]);
+        self.render_manager.push_snapshot(packet);
 
         Ok(())
     }

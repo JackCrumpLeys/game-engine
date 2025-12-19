@@ -52,12 +52,11 @@ macro_rules! impl_bundle {
             #[inline(always)]
             fn component_ids() -> Vec<ComponentId> {
                 // make sure no overlap
-                #[cfg(debug_assertions)]
                 {
                     let mut mask = ComponentMask::new();
                     $(
                         let id = $name::get_id();
-                        debug_assert!(!mask.has(id.0), "Duplicate component in bundle: {}", type_name::<$name>());
+                        assert!(!mask.has(id.0), "Duplicate component in bundle: {}", type_name::<$name>());
                         mask.set(id.0);
                     )*
                 }

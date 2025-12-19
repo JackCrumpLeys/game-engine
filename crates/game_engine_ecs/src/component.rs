@@ -179,7 +179,7 @@ pub fn allocate_component_id<T: 'static>() -> ComponentId {
     ComponentId(id)
 }
 
-pub trait Component: 'static + Send + Sync + Sized + Debug {
+pub trait Component: 'static + Send + Sync + Sized + Debug + Unpin {
     fn meta() -> ComponentMeta {
         let name = std::any::type_name::<Self>();
         let layout = std::alloc::Layout::new::<Self>();

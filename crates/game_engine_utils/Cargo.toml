@@ -1,0 +1,4 @@
+[package]
+name = "game_engine_utils"
+version = "0.1.0"
+edition = "2024"

@@ -1233,6 +1233,7 @@ dependencies = [
 name = "game_engine"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "fern",
  "game_engine_derive",
  "game_engine_ecs",
@@ -1263,6 +1264,7 @@ dependencies = [
  "bevy_ecs",
  "criterion",
  "game_engine_derive",
+ "game_engine_utils",
  "log",
  "smallvec 2.0.0-alpha.12",
 ]
@@ -1280,8 +1282,13 @@ name = "game_engine_shaders_types"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "game_engine_derive",
  "spirv-std",
 ]
+
+[[package]]
+name = "game_engine_utils"
+version = "0.1.0"
 
 [[package]]
 name = "gethostname"

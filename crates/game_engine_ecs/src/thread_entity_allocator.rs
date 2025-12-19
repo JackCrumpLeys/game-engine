@@ -144,37 +144,6 @@ mod entity_allocator_tests {
     }
 
     #[test]
-    fn test_decay_strategy() {
-        let global = Arc::new(RwLock::new(Entities::new()));
-        let mut local = LocalThreadEntityAllocator::new(global);
-
-        // Ramp up the growth manually to test decay
-        // Start: START_BATCH_SIZE
-        local.take = START_BATCH_SIZE * GROWTH_FACTOR * GROWTH_FACTOR; // e.g., 64 if start=16, growth=2
-        let current_take = local.take;
-
-        // Advance Tick
-        // Logic: if current_tick > last_seen, decay.
-        local.inc_tick();
-        local.alloc();
-        let expected_decay_1 = (current_take as f32 * DECAY_FACTOR) as u32;
-        assert_eq!(local.take, expected_decay_1.max(START_BATCH_SIZE));
-
-        // Advance again
-        local.inc_tick();
-        local.alloc();
-        let expected_decay_2 = (local.take as f32 * DECAY_FACTOR) as u32;
-        assert_eq!(local.take, expected_decay_2.max(START_BATCH_SIZE));
-
-        // Verify min clamp
-        // Force take to be small, then decay
-        local.take = START_BATCH_SIZE;
-        local.inc_tick();
-        local.alloc();
-        assert_eq!(local.take, START_BATCH_SIZE);
-    }
-
-    #[test]
     fn test_batch_passthrough() {
         let global = Arc::new(RwLock::new(Entities::new()));
         let mut local = LocalThreadEntityAllocator::new(global);

@@ -2,9 +2,36 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, Index, parse_macro_input};
 
-// Register the "interpolate" helper attribute here so the compiler doesn't complain
 #[proc_macro_derive(Interpolate, attributes(interpolate))]
 pub fn derive_interpolate(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let logic = match input.data {
+        Data::Struct(data) => expand_struct_fields(&data.fields),
+        _ => {
+            return syn::Error::new_spanned(name, "Interpolate can only be derived for structs")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    let expanded = quote! {
+        use game_engine_shaders_types::packet::Interpolate;
+
+        impl #impl_generics Interpolate for #name #ty_generics #where_clause {
+            fn interpolate(&self, other: &Self, factor: f32) -> Self {
+                #logic
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+#[proc_macro_derive(InterpolateM, attributes(interpolate))]
+pub fn derive_interpolate_m(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();

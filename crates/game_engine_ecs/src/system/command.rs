@@ -1,6 +1,9 @@
+use std::{marker::PhantomData, ptr};
+
 use crate::{
     bundle::Bundle,
     entity::Entity,
+    prelude::{Component, Resource},
     system::{SystemAccess, SystemParam, UnsafeWorldCell},
     thread_entity_allocator::LocalThreadEntityAllocator,
     threading::{FromWorldThread, WorldThreadLocalStore},
@@ -8,10 +11,33 @@ use crate::{
 };
 
 type ExecuteShim = unsafe fn(*mut u8, &mut World);
+type DropShim = unsafe fn(*mut u8);
 
 pub struct ThreadLocalCommandQueue {
-    // We store the data ptr and the function ptr that knows how to use it
-    commands: Vec<(*mut u8, ExecuteShim)>,
+    store: Vec<u8>,
+    ptrs: Vec<CommandExecutablePtr>,
+}
+
+pub struct CommandExecutablePtr {
+    /// Where is the data in the store?
+    data_offset: usize,
+    /// What we will do with that data?
+    execute_shim: ExecuteShim,
+    /// If the world is dropped before flush, how to clean up?
+    drop_shim: DropShim,
+}
+
+impl Drop for ThreadLocalCommandQueue {
+    fn drop(&mut self) {
+        // If we drop the queue without flushing, we must run destructors
+        // for the data sitting in the byte buffer.
+        for cmd in &self.ptrs {
+            unsafe {
+                let ptr = self.store.as_mut_ptr().add(cmd.data_offset);
+                (cmd.drop_shim)(ptr);
+            }
+        }
+    }
 }
 
 pub trait CommandExecutable: Sized {
@@ -32,17 +58,6 @@ pub trait CommandExecutable: Sized {
     /// Runs during `World::flush`.
     /// Has exclusive access to the whole World.
     fn execute(storage: Self::Storage, world: &mut World);
-
-    /// Get the command data from a boxed pointer.
-    /// # Safety
-    /// `ptr` must have been created via `Box::into_raw` using the same type
-    /// as `Self::ImmediateData`.
-    unsafe fn from_boxed_ptr(ptr: *mut u8) -> Self::Storage {
-        let typed_ptr = ptr as *mut Self::Storage;
-        let boxed = unsafe { Box::from_raw(typed_ptr) };
-
-        *boxed
-    }
 }
 
 pub struct SpawnCommand<B>
@@ -71,7 +86,6 @@ where
     }
 }
 
-// === 2. Despawn (Must be Deferred) ===
 pub struct DespawnCommand(pub Entity);
 
 impl CommandExecutable for DespawnCommand {
@@ -88,7 +102,6 @@ impl CommandExecutable for DespawnCommand {
     }
 }
 
-// === 3. Generic Closures (The "Catch-All") ===
 pub struct ClosureCommand<F>(pub F);
 
 impl<F> CommandExecutable for ClosureCommand<F>
@@ -108,6 +121,81 @@ where
     }
 }
 
+pub struct InsertComponentCommand<C>
+where
+    C: Component,
+{
+    pub entity: Entity,
+    pub component: C,
+}
+
+impl<C> CommandExecutable for InsertComponentCommand<C>
+where
+    C: Component + Send + 'static,
+{
+    type Output = ();
+    type Storage = (Entity, C);
+    const IS_DEFERRED: bool = true;
+
+    fn immediate(self, _: &mut CommandThreadLocalContext) -> ((Entity, C), ()) {
+        ((self.entity, self.component), ())
+    }
+
+    fn execute(data: (Entity, C), world: &mut World) {
+        let (entity, component) = data;
+        world.insert_component(entity, component);
+    }
+}
+
+pub struct RemoveComponentCommand<C>
+where
+    C: Component,
+{
+    pub entity: Entity,
+    _marker: PhantomData<C>,
+}
+
+impl<C> CommandExecutable for RemoveComponentCommand<C>
+where
+    C: Component + Send + 'static,
+{
+    type Output = ();
+    type Storage = Entity;
+    const IS_DEFERRED: bool = true;
+
+    fn immediate(self, _: &mut CommandThreadLocalContext) -> (Entity, ()) {
+        (self.entity, ())
+    }
+
+    fn execute(entity: Entity, world: &mut World) {
+        world.remove_component::<C>(entity);
+    }
+}
+
+pub struct InsertResourceCommand<R>
+where
+    R: Resource,
+{
+    pub resource: R,
+}
+
+impl<R> CommandExecutable for InsertResourceCommand<R>
+where
+    R: Resource + Send + 'static,
+{
+    type Output = ();
+    type Storage = R;
+    const IS_DEFERRED: bool = true;
+
+    fn immediate(self, _: &mut CommandThreadLocalContext) -> (R, ()) {
+        (self.resource, ())
+    }
+
+    fn execute(resource: R, world: &mut World) {
+        world.resources_mut().insert(resource);
+    }
+}
+
 impl FromWorldThread for ThreadLocalCommandQueue {
     fn new_thread_local(_thread_id: usize, _world: &World) -> ThreadLocalCommandQueue {
         ThreadLocalCommandQueue::new()
@@ -117,7 +205,8 @@ impl FromWorldThread for ThreadLocalCommandQueue {
 impl ThreadLocalCommandQueue {
     pub fn new() -> Self {
         Self {
-            commands: Vec::new(),
+            store: Vec::new(),
+            ptrs: Vec::new(),
         }
     }
 
@@ -129,32 +218,55 @@ impl ThreadLocalCommandQueue {
         let (immediate_data_internal, immediate_data_external) = command.immediate(thread_local);
         if T::IS_DEFERRED {
             /// # Safety
-            /// `ptr` must have been created via `Box::into_raw` using the same type
-            /// as `Self::ImmediateData`.
+            /// `ptr` must point to `Self::ImmediateData`.
             unsafe fn execute_shim_impl<T: CommandExecutable>(ptr: *mut u8, world: &mut World) {
                 // We assume ptr was created via Box::into_raw
-                let in_d = unsafe { T::from_boxed_ptr(ptr) };
+                let in_d = unsafe { ptr::read_unaligned(ptr as *mut T::Storage) };
 
                 T::execute(in_d, world);
             }
+            /// # Safety
+            /// `ptr` must point to `Self::ImmediateData`.
+            unsafe fn drop_shim_impl<T: CommandExecutable>(ptr: *mut u8) {
+                let in_d = unsafe { ptr::read_unaligned(ptr as *mut T::Storage) };
+                drop(in_d);
+            }
 
-            let b = Box::new(immediate_data_internal);
-            let ptr = Box::into_raw(b) as *mut u8;
+            let size = std::mem::size_of::<T::Storage>();
 
-            let shim = execute_shim_impl::<T>;
+            self.store.reserve(size);
 
-            self.commands.push((ptr, shim));
+            // Get the write location
+            let data_offset = self.store.len();
+            let ptr = unsafe { self.store.as_mut_ptr().add(data_offset) };
+
+            unsafe { ptr::write_unaligned(ptr as *mut T::Storage, immediate_data_internal) };
+
+            unsafe { self.store.set_len(data_offset + size) };
+
+            self.ptrs.push(CommandExecutablePtr {
+                data_offset,
+                execute_shim: execute_shim_impl::<T>,
+                drop_shim: drop_shim_impl::<T>,
+            });
         }
         immediate_data_external
     }
 
+    /// Execute all commands and clear the buffer
     pub fn apply(&mut self, world: &mut World) {
-        // Iterate through all stored commands
-        for (ptr, shim) in self.commands.drain(..) {
+        // Iterate over commands
+        for cmd in &self.ptrs {
             unsafe {
-                shim(ptr, world);
+                // Reconstruct the pointer into the buffer
+                let ptr = self.store.as_mut_ptr().add(cmd.data_offset);
+                // Call the shim
+                (cmd.execute_shim)(ptr, world);
             }
         }
+
+        self.ptrs.clear();
+        self.store.clear();
     }
 }
 
@@ -212,6 +324,21 @@ impl<'w> Command<'w> {
     /// This action is deferred until the world is flushed.
     pub fn despawn(&mut self, entity: Entity) {
         self.push(DespawnCommand(entity))
+    }
+
+    /// Inserts a component into an existing entity.
+    /// This action is deferred until the world is flushed.\
+    pub fn insert_component<C: Component>(&mut self, entity: Entity, component: C) {
+        self.push(InsertComponentCommand { entity, component })
+    }
+
+    /// Removes a component from an existing entity.
+    /// This action is deferred until the world is flushed.
+    pub fn remove_component<C: Component>(&mut self, entity: Entity) {
+        self.push(RemoveComponentCommand::<C> {
+            entity,
+            _marker: PhantomData,
+        })
     }
 
     /// Executes a custom closure on the world during flush.
@@ -359,10 +486,9 @@ mod test_commands {
             // 2. Deferred: Closure
             commands.execute(move |world| {
                 // By the time this runs (flush), 'e' should exist in the world
-                // because insert buffers usually flush before command queues
-                // (depending on World::flush implementation, but let's test isolation).
+                // insert buffers flush before command queues
 
-                // Assuming standard flush order: Allocator update -> Insert Buffer -> Command Queue
+                // Allocator update -> Insert Buffer -> Command Queue
                 if world.entities().is_alive(e) {
                     let mut res = world.resources_mut().get_mut_or_insert_default::<Score>();
                     res.0 = 999;

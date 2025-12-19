@@ -1,3 +1,5 @@
+use game_engine_utils::NoOpHash;
+
 use crate::borrow::AtomicBorrow;
 use std::any::{Any, TypeId, type_name};
 use std::cell::UnsafeCell;
@@ -7,6 +9,8 @@ use std::ops::{Deref, DerefMut};
 // Marker trait, similar to Component but for globals
 pub trait Resource: 'static + Send + Sync {}
 impl<T: 'static + Send + Sync> Resource for T {}
+
+pub type TypeIdMap<V> = HashMap<TypeId, V, NoOpHash>;
 
 struct ResourceCell {
     data: UnsafeCell<Box<dyn Any>>,
@@ -23,40 +27,21 @@ impl ResourceCell {
 }
 
 pub struct Resources {
-    map: HashMap<TypeId, ResourceCell>,
+    map: TypeIdMap<ResourceCell>,
 }
 
 impl Resources {
     pub fn new() -> Self {
         Self {
-            map: HashMap::new(),
+            map: TypeIdMap::default(),
         }
     }
 
     /// Inserts a resource of type R.
     /// panics if a resource of this type is already borrowed.
     pub fn insert<R: Resource>(&mut self, resource: R) {
-        // match self.map.get_mut(&TypeId::of::<R>()) {
-        //     Some(v) => {
-        //         if !v.borrow.borrow_mut() {
-        //             panic!(
-        //                 "Resource of this type is already borrowed, cannot insert new value. {}",
-        //                 type_name::<R>()
-        //             )
-        //         }
-        //
-        //         // Safety: We have exclusive access via borrow_mut
-        //         drop(unsafe { v.data.get() });
-        //
-        //         // Safety: We have exclusive access via borrow_mut
-        //         unsafe { *v.data.get() = Box::new(resource) };
-        //         v.borrow.release_mut();
-        //     }
-        //     None => {
         self.map
             .insert(TypeId::of::<R>(), ResourceCell::new(Box::new(resource)));
-        //     }
-        // }
     }
 
     pub fn register<R: Resource + Default>(&mut self) {

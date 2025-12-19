@@ -7,14 +7,15 @@ edition = "2024"
 fern = "0.7.1"
 glam = "0.30.8"
 image = "0.25.8"
-vulkano = "0.35.2"
 vulkano-shaders = "0.35.0"
 winit = "0.30.12"
 rand = "0.9.2"
 game_engine_derive.workspace = true
 game_engine_shaders_types.workspace = true
 game_engine_ecs.workspace = true
+bytemuck.workspace = true
 log.workspace = true
+vulkano.workspace = true
 
 [build-dependencies]
 spirv-builder.workspace = true
@@ -32,10 +33,12 @@ members = ["crates/*"]
 [workspace.dependencies]
 log = "0.4.28"
 smallvec = "2.0.0-alpha.12"
+vulkano = "0.35.2"
 game_engine_derive = { path = "crates/game_engine_derive" }
 game_engine_shaders = { path = "crates/game_engine_shaders" }
 game_engine_shaders_types = { path = "crates/game_engine_shaders_types" }
 game_engine_ecs = { path = "crates/game_engine_ecs" }
+game_engine_utils = { path = "crates/game_engine_utils" }
 
 bytemuck = { version = "1.24.0", features = ["derive"] }
 
