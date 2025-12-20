@@ -10,6 +10,8 @@ pub struct RenderPacketContents<T> {
     pub data: Vec<T>,
     /// The "Indirection List": Contains indices of entities that are actually alive.
     pub active_indices: Vec<u32>,
+    /// The indices that are new to this packet (not present in the previous one).
+    pub newly_spawned_indices: Vec<u32>,
 }
 
 impl<T> RenderPacketContents<T> {
@@ -17,15 +19,34 @@ impl<T> RenderPacketContents<T> {
         Self {
             data: Vec::new(),
             active_indices: Vec::new(),
+            newly_spawned_indices: Vec::new(),
         }
     }
 
-    pub fn new_all_data(data: Vec<T>) -> Self {
+    pub fn new_all_data(data: Vec<T>, newly_spawned_indices: Vec<u32>) -> Self {
         let active_indices = (0..data.len() as u32).collect();
         Self {
             data,
             active_indices,
+            newly_spawned_indices,
         }
+    }
+
+    pub fn clone_data(&self) -> Self
+    where
+        T: Clone,
+    {
+        Self {
+            data: self.data.clone(),
+            active_indices: self.active_indices.clone(),
+            newly_spawned_indices: Vec::new(),
+        }
+    }
+
+    pub fn insert(&mut self, index: u32, data: T) {
+        self.active_indices.push(index);
+        self.data.push(data);
+        self.newly_spawned_indices.push(index);
     }
 
     pub fn clear(&mut self) {
@@ -63,9 +84,16 @@ impl SnapshotPair {
         Self { old, new }
     }
 
+    pub fn new_empty() -> Self {
+        let empty_packet = RenderPacket::new();
+        Self {
+            old: empty_packet.clone(),
+            new: empty_packet,
+        }
+    }
+
     /// Shifts the current 'new' state to 'old' and accepts a fresh snapshot.
     pub fn push_new(&mut self, fresh: RenderPacket) {
-        // Swap ensures we reuse the internal Vec capacities of the discarded packet header.
         self.old = std::mem::replace(&mut self.new, fresh);
     }
 

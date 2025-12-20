@@ -7,5 +7,9 @@ edition = "2024"
 game_engine_shaders_types.workspace = true
 spirv-std.workspace = true
 
+[profile.release]
+lto = "fat"
+opt-level = 3
+
 [lib]
 crate-type = ["dylib"]

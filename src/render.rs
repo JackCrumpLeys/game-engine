@@ -1,10 +1,11 @@
-/// render module:
-/// Makes the window, initializes Vulkan, manages swapchain, and contains the render world ECS.
+///! render module:
+///! Makes the window, initializes Vulkan, manages swapchain, and contains the render world ECS.
 pub mod components;
 pub mod packet;
 mod pass;
 mod pipeline;
 mod shaders;
+mod storage;
 
 use std::sync::Arc;
 
@@ -106,7 +107,10 @@ impl RenderManager {
     pub fn push_snapshot(&mut self, snapshot: RenderPacket) {
         match self.snapshot_pair {
             Some(ref mut pair) => {
-                pair.push_new(snapshot);
+                pair.push_new(snapshot.clone());
+                if let Some(rctx) = &mut self.render_ctx {
+                    rctx.pass_manager.push_packet(snapshot);
+                }
             }
             None => {
                 self.snapshot_pair = Some(SnapshotPair::new(snapshot.clone(), snapshot));
@@ -280,11 +284,10 @@ impl ApplicationHandler for RenderManager {
                         // Handle rendering here
                         if let Some(snapshot_pair) = &mut self.snapshot_pair {
                             // Finally do pass
-                            match rcx.pass_manager.do_pass(
-                                &snapshot_pair,
-                                rcx.swapchain.clone(),
-                                rcx.queue.clone(),
-                            ) {
+                            match rcx
+                                .pass_manager
+                                .do_pass(rcx.swapchain.clone(), rcx.queue.clone())
+                            {
                                 Ok(r) => match r {
                                     pass::PassResult::Success => {
                                         log::trace!("Frame rendered successfully")

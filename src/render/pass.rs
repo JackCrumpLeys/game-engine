@@ -1,4 +1,5 @@
 use bytemuck::Pod;
+use game_engine_shaders_types::packet::GpuTrianglePacket;
 use std::sync::Arc;
 use std::time::Instant;
 use vulkano::buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo};
@@ -22,18 +23,24 @@ use vulkano::{Validated, VulkanError};
 use winit::window::Window;
 
 use crate::GameEngineResult;
-use crate::render::packet::{RenderPacketContents, SnapshotPair};
+use crate::render::packet::{RenderPacket, RenderPacketContents, SnapshotPair};
 use crate::render::pipeline::GpuPipeline;
 use crate::render::pipeline::triangle::TrianglePipeline;
+use crate::render::storage::{InterpolationCache, PingPongBuffer};
 use game_engine_shaders_types::PushConstants;
 
 pub struct PassManager {
     /// The specialized pipeline for drawing triangles
     triangle_pipeline: TrianglePipeline,
+    triangle_buffer_mgr: PingPongBuffer<GpuTrianglePacket>,
+    triangle_buf_cache: Option<InterpolationCache<GpuTrianglePacket>>,
+
+    snapshots: SnapshotPair,
     render_pass: Arc<RenderPass>,
     framebuffers: Vec<Arc<Framebuffer>>,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    memory_allocator: Arc<StandardMemoryAllocator>,
     /// Used for dynamic, per-frame uploads of SSBO data
     storage_allocator: SubbufferAllocator,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
@@ -78,7 +85,7 @@ impl PassManager {
         let storage_allocator = SubbufferAllocator::new(
             memory_allocator.clone(),
             SubbufferAllocatorCreateInfo {
-                buffer_usage: BufferUsage::STORAGE_BUFFER,
+                buffer_usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
                 // HOST_SEQUENTIAL_WRITE is essential for the CPU to stream data to the GPU every frame
                 memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
@@ -104,23 +111,35 @@ impl PassManager {
 
         let previous_frame_end = Some(sync::now(device).boxed());
 
+        let triangle_buffer_mgr = PingPongBuffer::new(memory_allocator.clone(), 1024)?;
+
+        let snapshots = SnapshotPair::new_empty();
+
         Ok(Self {
             start_time: Instant::now(),
             triangle_pipeline,
+            triangle_buffer_mgr,
+            triangle_buf_cache: None,
+            snapshots,
             render_pass,
             framebuffers,
             command_buffer_allocator,
             descriptor_set_allocator,
+            memory_allocator,
             storage_allocator,
             previous_frame_end,
             viewport,
         })
     }
 
+    pub fn push_packet(&mut self, packet: RenderPacket) {
+        self.snapshots.push_new(packet);
+        self.triangle_buf_cache = None; // Invalidate cache
+    }
+
     /// Records and submits the rendering commands for the current frame
     pub fn do_pass(
         &mut self,
-        snapshots: &SnapshotPair,
         swapchain: Arc<Swapchain>,
         queue: Arc<Queue>,
     ) -> GameEngineResult<PassResult> {
@@ -140,35 +159,92 @@ impl PassManager {
                 Err(e) => return Err(e.into()),
             };
 
-        // --- 1. UPLOAD DATA ---
-        // Map simulation data into GPU-side Storage Buffers (SSBOs)
-        let old_buffer = self.upload_contents(&snapshots.old.triangles)?;
-        let new_buffer = self.upload_contents(&snapshots.new.triangles)?;
-        let alive_buffer = self.upload_indices(&snapshots.new.triangles.active_indices)?;
+        if self.snapshots.new.triangles.active_indices.is_empty() {
+            // Nothing to draw this frame
+            self.previous_frame_end = Some(
+                self.previous_frame_end
+                    .take()
+                    .unwrap()
+                    .join(acquire_future)
+                    .then_swapchain_present(
+                        queue,
+                        SwapchainPresentInfo::swapchain_image_index(swapchain, image_index),
+                    )
+                    .then_signal_fence_and_flush()?
+                    .boxed(),
+            );
+            return Ok(PassResult::Success);
+        }
 
-        // --- 2. DESCRIPTOR SETS ---
-        // Set 0: Global Snapshots (Binding 0=Old, 1=New, 2=Alive)
-        let layout = &self.triangle_pipeline.pipeline().layout().set_layouts()[0];
-        let set0 = DescriptorSet::new(
-            self.descriptor_set_allocator.clone(),
-            layout.clone(),
-            [
-                WriteDescriptorSet::buffer(0, old_buffer),
-                WriteDescriptorSet::buffer(1, new_buffer),
-                WriteDescriptorSet::buffer(2, alive_buffer),
-            ],
-            [],
-        )?;
+        // 1. PREPARE UPLOADS
+        // We separate the upload commands into their own buffer.
+        // If we have a cached state (no new data), this buffer remains None.
+        let (old_buffer, new_buffer, alive_buffer, upload_buffer) = if let Some(cache) =
+            self.triangle_buf_cache.clone()
+        {
+            (
+                cache.old_buffer,
+                cache.new_buffer,
+                cache.alive_indices,
+                None,
+            )
+        } else {
+            let mut upload_builder = AutoCommandBufferBuilder::primary(
+                self.command_buffer_allocator.clone(),
+                queue.queue_family_index(),
+                CommandBufferUsage::OneTimeSubmit,
+            )?;
 
-        // --- 3. RECORD COMMANDS ---
+            // Record copies (transfer commands)
+            let (old_buffer, new_buffer) = self.triangle_buffer_mgr.prepare_frame(
+                self.memory_allocator.clone(),
+                &self.storage_allocator,
+                &mut upload_builder,
+                &self.snapshots.new.triangles.data,
+                &self.snapshots.new.triangles.newly_spawned_indices,
+            )?;
+
+            // Upload indices (writes to mapped memory, no command buffer needed usually,
+            // but we do it here to keep flow consistent)
+            let alive_buffer = self.upload_indices(&self.snapshots.new.triangles.active_indices)?;
+
+            self.triangle_buf_cache = Some(InterpolationCache {
+                old_buffer: old_buffer.clone(),
+                new_buffer: new_buffer.clone(),
+                alive_indices: alive_buffer.clone(),
+            });
+
+            (
+                old_buffer,
+                new_buffer,
+                alive_buffer,
+                Some(upload_builder.build()?),
+            )
+        };
+
+        // 2. RECORD DRAW COMMANDS
         let mut builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
 
+        // --- 2. DESCRIPTOR SETS ---
+        let layout = &self.triangle_pipeline.pipeline().layout().set_layouts()[0];
+        let set0 = DescriptorSet::new(
+            self.descriptor_set_allocator.clone(),
+            layout.clone(),
+            [
+                WriteDescriptorSet::buffer(0, old_buffer), // Binding 0
+                WriteDescriptorSet::buffer(1, new_buffer), // Binding 1
+                WriteDescriptorSet::buffer(2, alive_buffer),
+            ],
+            [],
+        )?;
+
         // Calculate the smooth interpolation factor for the GPU
-        let factor = snapshots.interpolation_factor();
+        let factor = self.snapshots.interpolation_factor();
+        println!("Interpolation Factor: {}", factor);
 
         builder
             .begin_render_pass(
@@ -200,7 +276,7 @@ impl PassManager {
             )?;
 
         // Execute the draw command from the concrete pipeline
-        let instance_count = snapshots.new.triangles.active_indices.len() as u32;
+        let instance_count = self.snapshots.new.triangles.active_indices.len() as u32;
         self.triangle_pipeline
             .record_draw(&mut builder, instance_count);
 
@@ -208,11 +284,19 @@ impl PassManager {
 
         // --- 4. EXECUTION ---
         let command_buffer = builder.build()?;
-        let future = self
-            .previous_frame_end
-            .take()
-            .unwrap()
-            .join(acquire_future)
+
+        // Start with the previous frame's end + image acquisition
+        let future = self.previous_frame_end.take().unwrap().join(acquire_future);
+
+        // If we have uploads, execute them FIRST
+        let future = if let Some(upload_buffer) = upload_buffer {
+            future.then_execute(queue.clone(), upload_buffer)?.boxed()
+        } else {
+            future.boxed()
+        };
+
+        // Then execute the draw commands and present
+        let future = future
             .then_execute(queue.clone(), command_buffer)?
             .then_swapchain_present(
                 queue,
