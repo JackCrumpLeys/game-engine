@@ -3,13 +3,13 @@
 pub mod components;
 pub mod packet;
 mod pass;
-mod pipeline;
 mod shaders;
-mod storage;
+pub mod storage;
 
 use std::sync::Arc;
 
 use game_engine_ecs::world::World;
+use glam::Vec2;
 use vulkano::{
     VulkanLibrary,
     device::{
@@ -31,16 +31,18 @@ use winit::{
 
 use crate::{
     GameEngineResult,
-    render::{
-        packet::{RenderPacket, SnapshotPair},
-        pass::PassManager,
-    },
+    render::{packet::SnapshotPair, pass::PassManager, storage::RenderPacket},
 };
 
 pub struct RenderManager {
     render_world: World,
     render_ctx: Option<RenderContext>,
     snapshot_pair: Option<SnapshotPair>,
+
+    pub camera_pos: Vec2,
+    pub zoom: f32,
+    mouse_pressed: bool,
+    last_mouse_pos: Vec2,
 }
 
 #[allow(dead_code)] // TODO: Remove when more fields are used
@@ -51,7 +53,8 @@ struct RenderContext {
     surface: Arc<Surface>,
     window: Arc<Window>,
     device: Arc<Device>,
-    queue: Arc<Queue>,
+    render_queue: Arc<Queue>,
+    transfer_queue: Arc<Queue>,
     swapchain: Arc<Swapchain>,
     swapchain_images: Vec<Arc<Image>>,
 }
@@ -97,6 +100,10 @@ impl RenderManager {
             render_world: World::new(),
             render_ctx: None,
             snapshot_pair: None,
+            camera_pos: glam::Vec2::ZERO,
+            zoom: 1.0,
+            mouse_pressed: false,
+            last_mouse_pos: glam::Vec2::ZERO,
         }
     }
 
@@ -107,13 +114,16 @@ impl RenderManager {
     pub fn push_snapshot(&mut self, snapshot: RenderPacket) {
         match self.snapshot_pair {
             Some(ref mut pair) => {
-                pair.push_new(snapshot.clone());
+                pair.push_new(snapshot.snapped_at.clone());
                 if let Some(rctx) = &mut self.render_ctx {
                     rctx.pass_manager.push_packet(snapshot);
                 }
             }
             None => {
-                self.snapshot_pair = Some(SnapshotPair::new(snapshot.clone(), snapshot));
+                self.snapshot_pair = Some(SnapshotPair::new(
+                    snapshot.snapped_at.clone(),
+                    snapshot.snapped_at,
+                ));
             }
         }
     }
@@ -169,6 +179,19 @@ impl ApplicationHandler for RenderManager {
             })
             .expect("No suitable physical device found");
 
+        // get secondary queue family for transfer operations
+
+        let transfer_queue_family_index = physical_device
+            .queue_family_properties()
+            .iter()
+            .enumerate()
+            .position(|(i, q)| {
+                q.queue_flags.contains(QueueFlags::TRANSFER)
+                    && !q.queue_flags.contains(QueueFlags::GRAPHICS)
+            })
+            .map(|i| i as u32)
+            .unwrap_or(queue_family_index); // fallback to graphics queue if no separate transfer
+        // queue
         log::info!(
             "Using device: {} (type: {:?})",
             physical_device.properties().device_name,
@@ -179,10 +202,16 @@ impl ApplicationHandler for RenderManager {
         let (device, mut queues) = Device::new(
             physical_device.clone(),
             DeviceCreateInfo {
-                queue_create_infos: vec![QueueCreateInfo {
-                    queue_family_index,
-                    ..Default::default()
-                }],
+                queue_create_infos: vec![
+                    QueueCreateInfo {
+                        queue_family_index,
+                        ..Default::default()
+                    },
+                    QueueCreateInfo {
+                        queue_family_index: transfer_queue_family_index,
+                        ..Default::default()
+                    },
+                ],
                 enabled_extensions: DeviceExtensions {
                     khr_swapchain: true,
                     khr_vulkan_memory_model: true,
@@ -197,7 +226,8 @@ impl ApplicationHandler for RenderManager {
         )
         .expect("Failed to create logical device");
 
-        let queue = queues.next().unwrap();
+        let render_queue = queues.next().unwrap();
+        let transfer_queue = queues.next().unwrap();
 
         // --- Swapchain Capabilities and Format Selection ---
         let surface_capabilities = physical_device
@@ -256,7 +286,8 @@ impl ApplicationHandler for RenderManager {
             physical_device,
             window,
             device,
-            queue,
+            render_queue,
+            transfer_queue,
             surface,
             swapchain,
             swapchain_images: images,
@@ -272,6 +303,31 @@ impl ApplicationHandler for RenderManager {
         event: WindowEvent,
     ) {
         match event {
+            WindowEvent::MouseWheel { delta, .. } => {
+                let amount = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.y / 100.0) as f32,
+                };
+                // Exponential zoom feels more natural
+                self.zoom *= 1.0 + (amount * 0.1);
+                // self.zoom = self.zoom.clamp(0.01, 100.0);
+            }
+
+            // --- PANNING ---
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button == winit::event::MouseButton::Left {
+                    self.mouse_pressed = state.is_pressed();
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let pos = glam::vec2(position.x as f32, -position.y as f32);
+                if self.mouse_pressed {
+                    let delta = pos - self.last_mouse_pos;
+                    // We divide by zoom so panning speed matches world movement
+                    self.camera_pos -= delta / self.zoom;
+                }
+                self.last_mouse_pos = pos;
+            }
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) | WindowEvent::Focused(_) => {
                 // Recreate swapchain when window is resized or focus changes
@@ -284,10 +340,13 @@ impl ApplicationHandler for RenderManager {
                         // Handle rendering here
                         if let Some(snapshot_pair) = &mut self.snapshot_pair {
                             // Finally do pass
-                            match rcx
-                                .pass_manager
-                                .do_pass(rcx.swapchain.clone(), rcx.queue.clone())
-                            {
+                            match rcx.pass_manager.do_pass(
+                                rcx.swapchain.clone(),
+                                rcx.render_queue.clone(),
+                                rcx.transfer_queue.clone(),
+                                self.camera_pos,
+                                self.zoom,
+                            ) {
                                 Ok(r) => match r {
                                     pass::PassResult::Success => {
                                         log::trace!("Frame rendered successfully")

@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 use game_engine_shaders_types::packet::GpuTrianglePacket;
 
+use crate::render::storage::RenderPacket;
+
 /// A generic container for a specific primitive's data.
 /// This matches the SoA (Structure of Arrays) layout expected by the GPU.
 #[derive(Clone, Default, Debug)]
@@ -54,47 +56,33 @@ impl<T> RenderPacketContents<T> {
     }
 }
 
-/// A unified snapshot of the simulation world at a specific moment in time.
-#[derive(Clone, Debug)]
-pub struct RenderPacket {
-    /// When this snapshot was captured.
-    pub snapped_at: Instant,
-    /// Collection of all triangle primitives in the world.
-    pub triangles: RenderPacketContents<GpuTrianglePacket>,
-}
-
-impl RenderPacket {
-    pub fn new() -> Self {
-        Self {
-            snapped_at: Instant::now(),
-            triangles: RenderPacketContents::new(),
-        }
-    }
-}
-
 /// Manages the visual timeline by holding the two most recent simulation states.
 #[derive(Debug)]
 pub struct SnapshotPair {
-    pub old: RenderPacket,
-    pub new: RenderPacket,
+    pub old: Instant,
+    pub new: Instant,
 }
 
 impl SnapshotPair {
-    pub fn new(old: RenderPacket, new: RenderPacket) -> Self {
+    pub fn new(old: Instant, new: Instant) -> Self {
         Self { old, new }
     }
 
-    pub fn new_empty() -> Self {
-        let empty_packet = RenderPacket::new();
+    pub fn from_packets(old: &RenderPacket, new: &RenderPacket) -> Self {
         Self {
-            old: empty_packet.clone(),
-            new: empty_packet,
+            old: old.snapped_at,
+            new: new.snapped_at,
         }
     }
 
-    /// Shifts the current 'new' state to 'old' and accepts a fresh snapshot.
-    pub fn push_new(&mut self, fresh: RenderPacket) {
-        self.old = std::mem::replace(&mut self.new, fresh);
+    pub fn new_empty() -> Self {
+        let now = Instant::now();
+        Self { old: now, new: now }
+    }
+
+    pub fn push_new(&mut self, new: Instant) {
+        self.old = self.new;
+        self.new = new;
     }
 
     /// Calculates the GPU alpha (0.0 to 1.0).
@@ -104,11 +92,11 @@ impl SnapshotPair {
         let now = Instant::now();
 
         // How much time has passed since the newest data point?
-        let duration_since_new = now.duration_since(self.new.snapped_at);
+        let duration_since_new = now.duration_since(self.new);
 
         // How long was the interval between our two known data points?
         // We assume the next tick will take roughly the same amount of time.
-        let old_to_new_duration = self.new.snapped_at.duration_since(self.old.snapped_at);
+        let old_to_new_duration = self.new.duration_since(self.old);
 
         if old_to_new_duration.is_zero() {
             return 1.0;

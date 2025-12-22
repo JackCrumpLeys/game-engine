@@ -1273,7 +1273,9 @@ dependencies = [
 name = "game_engine_shaders"
 version = "0.1.0"
 dependencies = [
+ "game_engine_derive",
  "game_engine_shaders_types",
+ "paste",
  "spirv-std",
 ]
 

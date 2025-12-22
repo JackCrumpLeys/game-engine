@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 game_engine_shaders_types.workspace = true
 spirv-std.workspace = true
+game_engine_derive.workspace = true
+paste.workspace = true
+
 
 [profile.release]
 lto = "fat"
