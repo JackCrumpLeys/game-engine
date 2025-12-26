@@ -1122,7 +1122,7 @@ impl<'w, Q: QueryToken, F: Filter> QueryState<'w, Q, F> {
 }
 #[cfg(test)]
 mod tests {
-    use std::mem;
+    
 
     use super::*;
     // Assuming Component, Entity, World are reachable

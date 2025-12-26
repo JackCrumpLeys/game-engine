@@ -1,38 +1,35 @@
-use bytemuck::Pod;
 use game_engine_shaders_types::packet::{
-    CIRCLE_SHAPE_INDEX, GpuTrianglePacket, InstancePointer, TRIANGLE_SHAPE_INDEX,
+    CIRCLE_SHAPE_INDEX, InstancePointer, TRIANGLE_SHAPE_INDEX,
 };
 use std::sync::Arc;
 use std::time::Instant;
+use vulkano::buffer::BufferUsage;
 use vulkano::buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo};
-use vulkano::buffer::{BufferContents, BufferUsage};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferBeginInfo, CommandBufferLevel, CommandBufferUsage,
-    PrimaryAutoCommandBuffer, RecordingCommandBuffer, RenderPassBeginInfo, SubpassBeginInfo,
+    AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo, SubpassBeginInfo,
     SubpassEndInfo,
 };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, Queue};
 use vulkano::image::Image;
 use vulkano::memory::allocator::{MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::color_blend::{
     AttachmentBlend, ColorBlendAttachmentState, ColorBlendState,
 };
-use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
+use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
-use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
+use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
 use vulkano::swapchain::{Swapchain, SwapchainPresentInfo, acquire_next_image};
 use vulkano::sync::{self, GpuFuture};
 use vulkano::{Validated, VulkanError, single_pass_renderpass};
 use winit::window::Window;
 
 use crate::GameEngineResult;
-use crate::render::packet::{RenderPacketContents, SnapshotPair};
+use crate::render::packet::SnapshotPair;
 use crate::render::shaders;
-use crate::render::storage::{GpuChannel, PingPongBuffer, RenderPacket, RenderSystem};
-use game_engine_shaders_types::{PushConstants, create_camera_matrix, create_projection_matrix};
+use crate::render::storage::{RenderPacket, RenderSystem};
+use game_engine_shaders_types::{PushConstants, create_camera_matrix};
 
 pub struct PassManager {
     // REFACTOR: The RenderSystem now manages all GPU data channels.
@@ -48,7 +45,7 @@ pub struct PassManager {
     pub(crate) command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     pub(crate) descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     pub(crate) memory_allocator: Arc<StandardMemoryAllocator>,
-    pub(crate) storage_allocator: Arc<SubbufferAllocator>,
+    pub(crate) storage_allocator: SubbufferAllocator,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
     viewport: Viewport,
     start_time: Instant,
@@ -123,7 +120,7 @@ impl PassManager {
         };
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
-        let storage_allocator = Arc::new(SubbufferAllocator::new(
+        let storage_allocator = SubbufferAllocator::new(
             memory_allocator.clone(),
             SubbufferAllocatorCreateInfo {
                 buffer_usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
@@ -131,7 +128,7 @@ impl PassManager {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-        ));
+        );
 
         Ok(Self {
             system: RenderSystem::new(memory_allocator.clone()), // REFACTOR
@@ -194,8 +191,7 @@ impl PassManager {
             .triangles
             .active_indices
             .iter()
-            .enumerate()
-            .map(|(_, &storage_index)| InstancePointer {
+            .map(|&storage_index| InstancePointer {
                 shape_type: TRIANGLE_SHAPE_INDEX,
                 local_index: storage_index,
             })
@@ -206,8 +202,7 @@ impl PassManager {
                 .circles
                 .active_indices
                 .iter()
-                .enumerate()
-                .map(|(_, &storage_index)| InstancePointer {
+                .map(|&storage_index| InstancePointer {
                     shape_type: CIRCLE_SHAPE_INDEX,
                     local_index: storage_index,
                 }),

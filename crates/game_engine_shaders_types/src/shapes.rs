@@ -1,7 +1,7 @@
-use crate::packet::Interpolate;
+use crate::packet::{GpuPacket, Interpolate};
 use bytemuck::{Pod, Zeroable};
 use game_engine_derive::InterpolateM;
-use spirv_std::glam::{Vec2, Vec4};
+use spirv_std::glam::{Vec2, Vec3, Vec4};
 
 #[derive(Copy, Clone, Zeroable, Pod, Debug, InterpolateM)]
 #[repr(C)]
@@ -53,11 +53,52 @@ impl ColorRGBA {
     pub fn alpha_mut(&mut self) -> &mut f32 {
         &mut self.0.w
     }
+    /// Creates an opaque [`ColorRGBA`] from Hue, Saturation, and Lightness (HSL).
+    ///
+    /// This conversion uses a vectorized implementation of the HSL to RGB color space
+    /// transformation.
+    ///
+    /// # Arguments
+    ///
+    /// * `h` - Hue: A value where `0.0` and `1.0` represent 0° and 360° (red).
+    ///   Values outside [0, 1] will wrap due to the modulo operation.
+    /// * `s` - Saturation: `0.0` is grayscale, `1.0` is full color.
+    ///   Expected range is `[0.0, 1.0]`.
+    /// * `l` - Lightness: `0.0` is black, `0.5` is the pure color, and `1.0` is white.
+    ///   Expected range is `[0.0, 1.0]`.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `ColorRGBA` with the calculated RGB values and an Alpha component of `1.0`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Create a bright pure red
+    /// let red = ColorRGBA::from_hsl(0.0, 1.0, 0.5);
+    ///
+    /// // Create a medium gray
+    /// let gray = ColorRGBA::from_hsl(0.0, 0.0, 0.5);
+    /// ```
+    pub fn from_hsl(h: f32, s: f32, l: f32) -> Self {
+        let k = Vec3::new(0.0, 4.0, 2.0);
+        // (h * 6.0 + k) % 6.0
+        let t = (Vec3::splat(h) * 6.0 + k) % 6.0;
+
+        // clamp(abs(t - 3.0) - 1.0, 0.0, 1.0)
+        let rgb = ((t - 3.0).abs() - 1.0).clamp(Vec3::ZERO, Vec3::ONE);
+
+        // l + s * (rgb - 0.5) * (1.0 - abs(2.0 * l - 1.0))
+        Self((l + s * (rgb - 0.5) * (1.0 - (2.0 * l - 1.0).abs())).extend(1.0))
+    }
 }
 
 #[derive(Copy, Clone, Zeroable, Debug, InterpolateM)]
 #[repr(C)]
-pub struct Stroked<T: Pod + Zeroable + Interpolate> {
+pub struct Stroked<T>
+where
+    T: GpuPacket,
+{
     pub inner: T,
     pub thickness: f32,
     pub color: ColorRGBA,

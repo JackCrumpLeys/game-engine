@@ -5,9 +5,8 @@ use crate::{
     entity::Entity,
     prelude::{Component, Resource},
     system::{SystemAccess, SystemParam, UnsafeWorldCell},
-    thread_entity_allocator::LocalThreadEntityAllocator,
-    threading::{FromWorldThread, WorldThreadLocalStore},
-    world::{CommandThreadLocalContext, EntityInsertBuffer, ThreadLocalWorldData, World},
+    threading::FromWorldThread,
+    world::{CommandThreadLocalContext, World},
 };
 
 type ExecuteShim = unsafe fn(*mut u8, &mut World);
@@ -202,6 +201,12 @@ impl FromWorldThread for ThreadLocalCommandQueue {
     }
 }
 
+impl Default for ThreadLocalCommandQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThreadLocalCommandQueue {
     pub fn new() -> Self {
         Self {
@@ -210,29 +215,29 @@ impl ThreadLocalCommandQueue {
         }
     }
 
-    unsafe fn push<T: CommandExecutable>(
+    unsafe fn push<C: CommandExecutable>(
         &mut self,
-        command: T,
+        command: C,
         thread_local: &mut CommandThreadLocalContext,
-    ) -> T::Output {
+    ) -> C::Output {
         let (immediate_data_internal, immediate_data_external) = command.immediate(thread_local);
-        if T::IS_DEFERRED {
+        if C::IS_DEFERRED {
             /// # Safety
             /// `ptr` must point to `Self::ImmediateData`.
-            unsafe fn execute_shim_impl<T: CommandExecutable>(ptr: *mut u8, world: &mut World) {
+            unsafe fn execute_shim_impl<C: CommandExecutable>(ptr: *mut u8, world: &mut World) {
                 // We assume ptr was created via Box::into_raw
-                let in_d = unsafe { ptr::read_unaligned(ptr as *mut T::Storage) };
+                let in_d = unsafe { ptr::read_unaligned(ptr as *mut C::Storage) };
 
-                T::execute(in_d, world);
+                C::execute(in_d, world);
             }
             /// # Safety
             /// `ptr` must point to `Self::ImmediateData`.
-            unsafe fn drop_shim_impl<T: CommandExecutable>(ptr: *mut u8) {
-                let in_d = unsafe { ptr::read_unaligned(ptr as *mut T::Storage) };
+            unsafe fn drop_shim_impl<C: CommandExecutable>(ptr: *mut u8) {
+                let in_d = unsafe { ptr::read_unaligned(ptr as *mut C::Storage) };
                 drop(in_d);
             }
 
-            let size = std::mem::size_of::<T::Storage>();
+            let size = std::mem::size_of::<C::Storage>();
 
             self.store.reserve(size);
 
@@ -240,14 +245,14 @@ impl ThreadLocalCommandQueue {
             let data_offset = self.store.len();
             let ptr = unsafe { self.store.as_mut_ptr().add(data_offset) };
 
-            unsafe { ptr::write_unaligned(ptr as *mut T::Storage, immediate_data_internal) };
+            unsafe { ptr::write_unaligned(ptr as *mut C::Storage, immediate_data_internal) };
 
             unsafe { self.store.set_len(data_offset + size) };
 
             self.ptrs.push(CommandExecutablePtr {
                 data_offset,
-                execute_shim: execute_shim_impl::<T>,
-                drop_shim: drop_shim_impl::<T>,
+                execute_shim: execute_shim_impl::<C>,
+                drop_shim: drop_shim_impl::<C>,
             });
         }
         immediate_data_external

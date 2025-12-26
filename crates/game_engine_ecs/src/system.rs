@@ -287,7 +287,7 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
             unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
         );
         // Explicitly pass the View and Filter types to the generic iter method
-        self.query.iter::<Q::View<'_>, F>(&self.world, self.tick)
+        self.query.iter::<Q::View<'_>, F>(self.world, self.tick)
     }
 
     /// runs a closure for each item in the query.
@@ -299,7 +299,7 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
         let world = unsafe { self.world.world_mut() };
         debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
         self.query
-            .for_each::<Q::View<'a>, F, Func>(&self.world, func, self.tick)
+            .for_each::<Q::View<'a>, F, Func>(self.world, func, self.tick)
     }
 
     /// get a specific entity's query item, if it exists.
@@ -311,7 +311,7 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
         debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
         // debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0 as usize);
         self.query
-            .get::<Q::View<'_>, F>(&self.world, entity, self.tick)
+            .get::<Q::View<'_>, F>(self.world, entity, self.tick)
     }
 }
 

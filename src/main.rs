@@ -21,9 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         // Add blanket level filter -
         .level(log::LevelFilter::Debug)
-        // Output to stdout, files, and other Dispatch configurations
         .chain(std::io::stdout())
-        .chain(fern::log_file("logs/output.log")?)
         // Apply globally
         .apply()?;
 

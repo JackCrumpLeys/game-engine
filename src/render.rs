@@ -1,5 +1,5 @@
-///! render module:
-///! Makes the window, initializes Vulkan, manages swapchain, and contains the render world ECS.
+//! render module:
+//! Makes the window, initializes Vulkan, manages swapchain, and contains the render world ECS.
 pub mod components;
 pub mod packet;
 mod pass;
@@ -26,6 +26,7 @@ use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::ActiveEventLoop,
+    platform::x11::WindowAttributesExtX11,
     window::{Window, WindowId},
 };
 
@@ -114,16 +115,14 @@ impl RenderManager {
     pub fn push_snapshot(&mut self, snapshot: RenderPacket) {
         match self.snapshot_pair {
             Some(ref mut pair) => {
-                pair.push_new(snapshot.snapped_at.clone());
+                pair.push_new(snapshot.snapped_at);
                 if let Some(rctx) = &mut self.render_ctx {
                     rctx.pass_manager.push_packet(snapshot);
                 }
             }
             None => {
-                self.snapshot_pair = Some(SnapshotPair::new(
-                    snapshot.snapped_at.clone(),
-                    snapshot.snapped_at,
-                ));
+                self.snapshot_pair =
+                    Some(SnapshotPair::new(snapshot.snapped_at, snapshot.snapped_at));
             }
         }
     }
@@ -149,7 +148,11 @@ impl ApplicationHandler for RenderManager {
         // --- Window Creation ---
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes())
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("my-rust-bg")
+                        .with_name("rust-bg-class", "rust-bg-class"),
+                )
                 .unwrap(),
         );
 
@@ -185,7 +188,7 @@ impl ApplicationHandler for RenderManager {
             .queue_family_properties()
             .iter()
             .enumerate()
-            .position(|(i, q)| {
+            .position(|(_, q)| {
                 q.queue_flags.contains(QueueFlags::TRANSFER)
                     && !q.queue_flags.contains(QueueFlags::GRAPHICS)
             })
@@ -303,6 +306,7 @@ impl ApplicationHandler for RenderManager {
         event: WindowEvent,
     ) {
         match event {
+            // TODO: Proper key recording and shi
             WindowEvent::MouseWheel { delta, .. } => {
                 let amount = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
@@ -313,7 +317,6 @@ impl ApplicationHandler for RenderManager {
                 // self.zoom = self.zoom.clamp(0.01, 100.0);
             }
 
-            // --- PANNING ---
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == winit::event::MouseButton::Left {
                     self.mouse_pressed = state.is_pressed();
@@ -338,7 +341,7 @@ impl ApplicationHandler for RenderManager {
                 match &mut self.render_ctx {
                     Some(rcx) => {
                         // Handle rendering here
-                        if let Some(snapshot_pair) = &mut self.snapshot_pair {
+                        if self.snapshot_pair.is_none() {
                             // Finally do pass
                             match rcx.pass_manager.do_pass(
                                 rcx.swapchain.clone(),

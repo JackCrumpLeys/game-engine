@@ -14,12 +14,10 @@ use vulkano::command_buffer::{
     AutoCommandBufferBuilder, BufferCopy, CopyBufferInfo, PrimaryAutoCommandBuffer,
 };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
-use vulkano::descriptor_set::layout::DescriptorSetLayout;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::GraphicsPipeline;
 use vulkano::pipeline::Pipeline;
-use vulkano::sync::{AccessFlags, DependencyInfo, MemoryBarrier, PipelineStage, PipelineStages};
 
 pub struct PingPongBuffer<T: Pod + Send + Sync> {
     buffer_a: Subbuffer<[T]>,
@@ -262,6 +260,12 @@ macro_rules! define_render_system {
             $(
                 pub $channel_name: RenderPacketContents<$packet_type>,
             )*
+        }
+
+        impl Default for RenderPacket {
+            fn default() -> Self {
+                Self::new()
+            }
         }
 
         impl RenderPacket {

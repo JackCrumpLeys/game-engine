@@ -1,5 +1,3 @@
-use core::usize;
-
 use game_engine_shaders_types::{
     PushConstants, Vec2, Vec4,
     packet::{GpuCirclePacket, GpuPacket, GpuTrianglePacket},

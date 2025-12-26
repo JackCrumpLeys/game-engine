@@ -751,7 +751,7 @@ impl World {
         target_loc.row = self.archetypes[new_id].len() - 1;
     }
 
-    pub fn query<Q: QueryToken, F: Filter>(&mut self) -> QueryState<Q, F> {
+    pub fn query<Q: QueryToken, F: Filter>(&'_ mut self) -> QueryState<'_, Q, F> {
         QueryState::new(self)
     }
 
@@ -814,7 +814,7 @@ impl World {
         self.current_tick
     }
 
-    pub(crate) fn thread_local(&self, thread_id: usize) -> &ThreadLocalWorldData {
+    pub fn thread_local(&self) -> &ThreadLocalWorldData {
         self.thread_local.get_ref(self)
     }
 

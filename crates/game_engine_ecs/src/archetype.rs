@@ -91,15 +91,15 @@ impl Archetype {
 
         // 1. Move components
         for column_id in &to_arch.component_ids.clone() {
-            if !self.component_mask.has_id(&column_id) {
+            if !self.component_mask.has_id(column_id) {
                 continue;
             }
 
             let from_column = self
-                .column_mut(&column_id)
+                .column_mut(column_id)
                 .expect("Column should exist for component ID");
             let to_column = to_arch
-                .column_mut(&column_id)
+                .column_mut(column_id)
                 .expect("Column should exist for component ID");
 
             from_column.swap_remove_into(from_row, to_column);
