@@ -68,4 +68,4 @@ define_renderer!(
 
 );
 // BINDING CONSTANTS MUST MATCH THE VALUES USED IN THE MACRO CALL ABOVE!
-// I COuld odo this in build.rs but ehhh
+// I Could do this in build.rs but ehhh

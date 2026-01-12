@@ -33,6 +33,7 @@ impl GpuTrianglePacket {
                 },
                 thickness: 2.0,
                 color: ColorRGBA::new(0., 0., 1., 1.),
+                _pad: Default::default(),
             },
         }
     }
@@ -69,6 +70,7 @@ impl GpuCirclePacket {
                 },
                 thickness: 2.0,
                 color: ColorRGBA::new(1., 0., 0., 1.),
+                _pad: Default::default(),
             },
         }
     }

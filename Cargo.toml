@@ -27,6 +27,13 @@ incremental = true
 lto = "fat"
 opt-level = 3
 
+
+[profile.small]
+inherits = "release"
+lto = "fat"
+opt-level = "z"
+codegen-units = 1
+
 [workspace]
 resolver = "3"
 members = ["crates/*"]

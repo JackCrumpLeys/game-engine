@@ -579,31 +579,21 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         let arch_id = location.archetype_id();
         let arch = unsafe { &mut world.world_mut().archetypes[arch_id] } as *mut Archetype;
 
-        // 2. Check if Entity's Archetype matches Query masks
+        // Check if Entity's Archetype matches Query masks
         if !self.check_archetype(unsafe { &*arch }) {
             return None;
         }
 
-        // 3. Local Borrow Check (just for this specific access)
-        let mut borrow_checker = ColumnBorrowChecker::new();
-        let mut filter_borrow_checker = ColumnBorrowChecker::new();
-        QD::borrow_columns(unsafe { &world.world().registry }, &mut borrow_checker);
-        FD::borrow_columns(
-            unsafe { &world.world().registry },
-            &mut filter_borrow_checker,
-        );
-        borrow_checker.overlay(&filter_borrow_checker);
-
-        if !borrow_checker.apply_borrow(unsafe { &*arch }) {
+        if !self.borrow_checker.apply_borrow(unsafe { &*arch }) {
             panic!("Query borrow conflict detected");
         }
 
-        // 4. Create Fetch pointing to the start of the archetype
+        // Create Fetch pointing to the start of the archetype
         let mut fetch =
             unsafe { V::create_fetch(arch, &world.world().registry, world.world().tick()) }?;
 
-        // 5. Retrieve the atomic borrow states so `GetGuard` can release them later
-        let raw_borrows = borrow_checker.get_raw_borrows(unsafe { &*arch });
+        // Retrieve the atomic borrow states so `GetGuard` can release them later
+        let raw_borrows = self.borrow_checker.get_raw_borrows(unsafe { &*arch });
 
         if let Some(mut skip_filter) =
             unsafe { F::create_skip_filter(arch, &world.world().registry, tick) }
@@ -613,12 +603,12 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             if skip_filter.should_skip() {
                 // Entity is filtered out
                 // Release local borrows before returning
-                borrow_checker.release_borrow(unsafe { &mut *arch });
+                self.borrow_checker.release_borrow(unsafe { &mut *arch });
                 return None;
             }
         }
 
-        // 6. Get the specific row data
+        // Get the specific row data
         // SAFETY: `location.row()` comes from `world.entity_index` which is kept in sync with archetypes.
         unsafe { Some(GetGuard::new(fetch.get(location.row()), raw_borrows)) }
     }
@@ -1082,8 +1072,7 @@ macro_rules! impl_query_tuples {
     }
 }
 
-impl_all_tuples!(
-    impl_query_tuples, A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10, L 11, M 12, N 13);
+auto_impl_all_tuples!(impl_query_tuples);
 
 // ------------------------------------------------------------------------
 // Helper: QueryState Wrapper
@@ -1122,7 +1111,6 @@ impl<'w, Q: QueryToken, F: Filter> QueryState<'w, Q, F> {
 }
 #[cfg(test)]
 mod tests {
-    
 
     use super::*;
     // Assuming Component, Entity, World are reachable

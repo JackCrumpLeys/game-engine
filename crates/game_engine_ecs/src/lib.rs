@@ -9,6 +9,7 @@ pub mod entity;
 pub mod message;
 pub mod query;
 pub mod resource;
+pub mod schedule;
 mod storage;
 pub mod system;
 mod thread_entity_allocator;

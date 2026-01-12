@@ -74,6 +74,8 @@ impl ColorRGBA {
     /// # Examples
     ///
     /// ```
+    /// use game_engine_shaders_types::shapes::ColorRGBA;
+    ///
     /// // Create a bright pure red
     /// let red = ColorRGBA::from_hsl(0.0, 1.0, 0.5);
     ///
@@ -96,12 +98,14 @@ impl ColorRGBA {
 #[derive(Copy, Clone, Zeroable, Debug, InterpolateM)]
 #[repr(C)]
 pub struct Stroked<T>
+// T should be Align 0x10!
 where
     T: GpuPacket,
 {
     pub inner: T,
-    pub thickness: f32,
     pub color: ColorRGBA,
+    pub thickness: f32,
+    pub _pad: [f32; 3],
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -178,17 +182,18 @@ macro_rules! unsafe_impl_stroked_pod {
             let struct_size = mem::size_of::<Stroked<$concrete>>();
             let inner_size = mem::size_of::<$concrete>();
             let thick_size = mem::size_of::<f32>();
+            let color_size = mem::size_of::<ColorRGBA>();
 
             // If the struct size is larger than the sum of its parts,
             // the compiler added padding bytes => Undefined Behavior for Pod.
             assert_eq!(
                 struct_size,
-                inner_size + thick_size,
+                inner_size + thick_size + color_size + 12,
                 "\n\n[SAFETY FAILURE] Manual Pod implementation for Stroked<{}> is unsafe!\n\
                  Struct Size: {} bytes\n\
-                 Sum of Fields: {} bytes (Inner: {} + Thickness: {})\n\
+                 Sum of Fields: {} bytes (Inner: {} + Thickness: {} + color: {})\n\
                  The compiler has inserted padding bytes. You cannot use Pod.\n",
-                stringify!($concrete), struct_size, (inner_size + thick_size), inner_size, thick_size
+                stringify!($concrete), struct_size, (inner_size + thick_size + color_size), inner_size, thick_size, color_size
             );
         }
     };

@@ -24,6 +24,7 @@ lto = "fat"
 opt-level = 3
 codegen-units = 1
 
+
 [[bench]]
 name = "iter_bench"
 harness = false
