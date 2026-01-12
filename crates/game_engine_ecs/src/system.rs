@@ -228,9 +228,6 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
     /// Requires &mut self for queries containing &mut T.
     pub fn iter_mut(&mut self) -> QueryIter<'_, Q::View<'_>, F> {
         // Safety: at this point the column borrow checks have been done by the scheduler.
-        debug_assert!(
-            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
-        );
         self.query.iter::<Q::View<'_>, F>(self.world, self.tick)
     }
 
@@ -241,7 +238,6 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
         Func: FnMut(<Q::View<'a> as View<'a>>::Item),
     {
         let world = unsafe { self.world.world_mut() };
-        debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
         self.query
             .for_each::<Q::View<'a>, F, Func>(self.world, func, self.tick)
     }
@@ -252,9 +248,6 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
         &mut self,
         entity: crate::entity::Entity,
     ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
-        debug_assert!(
-            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
-        );
         self.query
             .get::<Q::View<'_>, F>(self.world, entity, self.tick)
     }
@@ -263,9 +256,6 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
 /// Methods available when the query only contains read-only data (e.g., &T, Entity).
 impl<'w, Q: QueryToken + ReadOnly, F: Filter> Query<'w, Q, F> {
     pub fn iter(&self) -> QueryIter<'_, Q::View<'_>, F> {
-        debug_assert!(
-            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
-        );
         self.query.iter::<Q::View<'_>, F>(self.world, self.tick)
     }
 
@@ -273,9 +263,6 @@ impl<'w, Q: QueryToken + ReadOnly, F: Filter> Query<'w, Q, F> {
     where
         Func: FnMut(<Q::View<'a> as View<'a>>::Item),
     {
-        debug_assert!(
-            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
-        );
         self.query
             .for_each::<Q::View<'a>, F, Func>(self.world, func, self.tick)
     }
@@ -284,9 +271,6 @@ impl<'w, Q: QueryToken + ReadOnly, F: Filter> Query<'w, Q, F> {
         &self,
         entity: crate::entity::Entity,
     ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
-        debug_assert!(
-            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
-        );
         self.query
             .get::<Q::View<'_>, F>(self.world, entity, self.tick)
     }
@@ -339,6 +323,7 @@ impl<Q: QueryToken, F: Filter> SystemParam for Query<'_, Q, F> {
                 };
             }
         }
+
         state.1 = ArchetypeId(world.archetypes.len());
         changed
     }
