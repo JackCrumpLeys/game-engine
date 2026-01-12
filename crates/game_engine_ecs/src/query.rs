@@ -53,9 +53,6 @@ pub trait View<'a>: Sized {
         registry: &ComponentRegistry,
         tick: u32,
     ) -> Option<Self::Fetch>;
-
-    /// Borrow the columns needed for the view.
-    fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker);
 }
 
 // --- Read Implementation ---
@@ -116,6 +113,7 @@ impl<T: Component> QueryToken for &T {
 pub struct ReadComponent<T>(PhantomData<T>);
 
 impl<T: Component> QueryData for ReadComponent<T> {
+    // Populate registry and requred data
     fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
         out.push(registry.register::<T>());
     }
@@ -140,6 +138,53 @@ impl<T: Component> QueryData for WriteComponent<T> {
 
     fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {
         checker.borrow_mut(registry.get_id::<T>().expect("Component not registered"));
+    }
+}
+
+impl<T: QueryToken> QueryToken for Option<T> {
+    type View<'a> = Option<T::View<'a>>;
+    type Persistent = OptionalData<T::Persistent>;
+}
+
+#[derive(Debug)]
+pub struct OptionalData<T>(PhantomData<T>);
+
+impl<T: QueryData> QueryData for OptionalData<T> {
+    fn populate_ids(registry: &mut ComponentRegistry, _out: &mut Vec<ComponentId>) {
+        T::populate_ids(registry, &mut Vec::new());
+    }
+
+    fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {
+        T::borrow_columns(registry, checker);
+    }
+}
+
+impl<'a, V: View<'a>> View<'a> for Option<V> {
+    type Item = Option<V::Item>;
+    type Fetch = OptionalFetch<V::Fetch>;
+
+    unsafe fn create_fetch(
+        archetype: *mut Archetype,
+        registry: &ComponentRegistry,
+        tick: u32,
+    ) -> Option<Self::Fetch> {
+        Some(OptionalFetch(unsafe {
+            V::create_fetch(archetype, registry, tick)
+        }))
+    }
+}
+
+pub struct OptionalFetch<V>(Option<V>);
+
+impl<'a, V: Fetch<'a>> Fetch<'a> for OptionalFetch<V> {
+    type Item = Option<V::Item>;
+
+    unsafe fn next(&mut self) -> Self::Item {
+        self.0.as_mut().map(|f| unsafe { f.next() })
+    }
+
+    unsafe fn get(&mut self, index: usize) -> Self::Item {
+        self.0.as_mut().map(|f| unsafe { f.get(index) })
     }
 }
 
@@ -223,10 +268,6 @@ impl<'a, T: Component> View<'a> for Mut<'a, T> {
             _marker: PhantomData,
         })
     }
-
-    fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker) {
-        borrow_checker.borrow_mut(registry.get_id::<T>().expect("Component not registered"));
-    }
 }
 
 impl<'a, T: Component> View<'a> for &'a T {
@@ -247,10 +288,6 @@ impl<'a, T: Component> View<'a> for &'a T {
         Some(ReadFetch {
             ptr: unsafe { NonNull::new_unchecked(ptr) },
         })
-    }
-
-    fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker) {
-        borrow_checker.borrow(registry.get_id::<T>().expect("Component not registered"));
     }
 }
 // The wrapper yielded by the iterator
@@ -309,10 +346,6 @@ impl<'a> View<'a> for Entity {
             entities: unsafe { &*archetype }.entities(),
             current: 0,
         })
-    }
-
-    fn borrow_columns(_registry: &ComponentRegistry, _borrow_checker: &mut ColumnBorrowChecker) {
-        // No components to borrow
     }
 }
 
@@ -1008,10 +1041,6 @@ macro_rules! impl_query_tuples {
             unsafe fn create_fetch(arch: *mut Archetype, reg: &ComponentRegistry, tick: u32) -> Option<Self::Fetch> {
                 unsafe { Some(( $( $name::create_fetch(arch, reg, tick)?, )* )) }
             }
-
-            fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker) {
-                $( $name::borrow_columns(registry, borrow_checker); )*
-            }
         }
 
         // QueryData Tuple
@@ -1370,5 +1399,186 @@ mod tests {
         let mut query = QueryState::<(&u32, &Dead)>::new(&mut world);
         let count = query.iter().count();
         assert_eq!(count, 1);
+    }
+
+    // Defined locally for these tests to avoid conflicts
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    struct Health(i32);
+
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    struct Mana(i32);
+
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    struct Shield(i32);
+
+    #[derive(Debug)]
+    struct Hero; // Marker
+
+    impl_component!(Health, Mana, Shield, Hero);
+
+    #[test]
+    fn test_optional_read_mixed_archetypes() {
+        let mut world = World::new();
+
+        // Arch 1: Health + Mana
+        world.spawn((Health(100), Mana(50)));
+        // Arch 2: Health only
+        world.spawn((Health(80),));
+        // Arch 3: Health + Mana + Hero
+        world.spawn((Health(120), Mana(100), Hero));
+
+        // Query: Everyone has Health, Mana is optional
+        let mut query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
+
+        let mut count_with_mana = 0;
+        let mut count_without_mana = 0;
+
+        for (hp, mana_opt) in query.iter() {
+            match mana_opt {
+                Some(mana) => {
+                    count_with_mana += 1;
+                    // Sanity check: If they have mana, they are either Arch 1 or 3
+                    assert!(hp.0 == 100 || hp.0 == 120);
+                    assert!(mana.0 == 50 || mana.0 == 100);
+                }
+                None => {
+                    count_without_mana += 1;
+                    // Sanity check: Arch 2
+                    assert_eq!(hp.0, 80);
+                }
+            }
+        }
+
+        assert_eq!(count_with_mana, 2);
+        assert_eq!(count_without_mana, 1);
+        // Ensure we iterated 3 entities total
+        assert_eq!(query.iter().count(), 3);
+    }
+
+    #[test]
+    fn test_optional_write() {
+        let mut world = World::new();
+
+        // Mage: Has Mana
+        world.spawn((Health(50), Mana(10)));
+        // Warrior: No Mana
+        world.spawn((Health(100),));
+
+        let mut query = QueryState::<(&Health, Option<&mut Mana>)>::new(&mut world);
+
+        // Regenerate mana if they have it
+        for (_hp, mana_opt) in query.iter() {
+            if let Some(mut mana) = mana_opt {
+                mana.0 += 5;
+            }
+        }
+
+        // Verify Mage updated
+        let mut check_query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
+        for (hp, mana_opt) in check_query.iter() {
+            if hp.0 == 50 {
+                assert_eq!(mana_opt.unwrap().0, 15, "Mage should have regenerated mana");
+            } else if hp.0 == 100 {
+                assert!(mana_opt.is_none(), "Warrior should still have no mana");
+            }
+        }
+    }
+
+    #[test]
+    fn test_multiple_optionals() {
+        let mut world = World::new();
+
+        // 1. Health, Mana, Shield
+        world.spawn((Health(10), Mana(10), Shield(10)));
+        // 2. Health, Mana
+        world.spawn((Health(10), Mana(10)));
+        // 3. Health, Shield
+        world.spawn((Health(10), Shield(10)));
+        // 4. Health Only
+        world.spawn((Health(10),));
+
+        // Query: Health (Req), Mana (Opt), Shield (Opt)
+        let mut query = QueryState::<(&Health, Option<&Mana>, Option<&Shield>)>::new(&mut world);
+
+        let mut results = Vec::new();
+        for (_, mana, shield) in query.iter() {
+            results.push((mana.is_some(), shield.is_some()));
+        }
+
+        // We expect 4 results, order depends on archetype storage but usually insertion order for these tests
+        // We just check counts here to be safe against iteration order
+        let both = results.iter().filter(|(m, s)| *m && *s).count();
+        let mana_only = results.iter().filter(|(m, s)| *m && !*s).count();
+        let shield_only = results.iter().filter(|(m, s)| !*m && *s).count();
+        let neither = results.iter().filter(|(m, s)| !*m && !*s).count();
+
+        assert_eq!(both, 1, "Should have 1 entity with both");
+        assert_eq!(mana_only, 1, "Should have 1 entity with mana only");
+        assert_eq!(shield_only, 1, "Should have 1 entity with shield only");
+        assert_eq!(neither, 1, "Should have 1 entity with neither");
+    }
+
+    #[test]
+    fn test_optional_with_filters() {
+        let mut world = World::new();
+
+        // A: HP, Mana
+        world.spawn((Health(100), Mana(100)));
+        // B: HP (No Mana)
+        world.spawn((Health(100),));
+
+        // Query: Get Option<Mana>, but Filter With<Mana>.
+        // This is redundant practically, but effectively tests that Option doesn't override Filter.
+        // Expectation: Option returns Some(), because Filter removed the None cases.
+        let mut query = QueryState::<Option<&Mana>, With<Mana>>::new(&mut world);
+        assert_eq!(query.iter().count(), 1);
+        for mana in query.iter() {
+            assert!(mana.is_some());
+        }
+
+        // Query: Get Option<Mana>, Filter Without<Mana>.
+        // Expectation: Option returns None, because Filter removed the Some cases.
+        let mut query_none = QueryState::<Option<&Mana>, Without<Mana>>::new(&mut world);
+        assert_eq!(query_none.iter().count(), 1);
+        for mana in query_none.iter() {
+            assert!(mana.is_none());
+        }
+    }
+
+    #[test]
+    fn test_get_random_access_optional() {
+        let mut world = World::new();
+        let e_full = world.spawn((Health(100), Mana(50)));
+        let e_partial = world.spawn((Health(80),));
+
+        let mut query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
+
+        // Test Full Entity
+        let guard = query.get(e_full).expect("Entity should exist");
+        assert_eq!(guard.0.0, 100);
+        assert_eq!(guard.1.expect("Should have mana").0, 50);
+        drop(guard); // Release borrow
+
+        // Test Partial Entity
+        let guard = query.get(e_partial).expect("Entity should exist");
+        assert_eq!(guard.0.0, 80);
+        assert!(guard.1.is_none(), "Should not have mana");
+    }
+
+    #[test]
+    fn test_optional_all_missing() {
+        let mut world = World::new();
+        world.spawn((Health(10),));
+        world.spawn((Health(20),));
+
+        // Querying for something no one has
+        let mut query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
+
+        let count = query.iter().count();
+        assert_eq!(count, 2);
+
+        for (_, mana) in query.iter() {
+            assert!(mana.is_none());
+        }
     }
 }
