@@ -399,7 +399,7 @@ mod test_commands {
             // Crucial Check: The Entity ID is correct
             commands.execute(move |world| {
                 assert!(world.entities().is_alive(e));
-                let mut query = QueryState::<&Position>::new(world);
+                let query = QueryState::<&Position>::new(world);
                 assert_eq!(
                     *query.get(e).unwrap().deref(),
                     &Position { x: 10.0, y: 20.0 }
@@ -413,7 +413,7 @@ mod test_commands {
         // The entity ID is allocated in the thread-local allocator,
         // but it is not yet "alive" in the main world index or archetype storage.
         {
-            let mut query = crate::query::QueryState::<&Position>::new(&mut world);
+            let query = crate::query::QueryState::<&Position>::new(&mut world);
             assert_eq!(query.iter().count(), 0);
         }
 
@@ -423,7 +423,7 @@ mod test_commands {
         // Post-Flush:
         // The insert buffer should have been drained and the entity created.
         {
-            let mut query = crate::query::QueryState::<&Position>::new(&mut world);
+            let query = crate::query::QueryState::<&Position>::new(&mut world);
             let pos = query.iter().next().expect("Entity should exist now");
             assert_eq!(pos.x, 10.0);
         }
@@ -435,7 +435,7 @@ mod test_commands {
         let e = world.spawn((Position { x: 0.0, y: 0.0 },));
         world.flush(); // Ensure E exists
 
-        fn despawn_sys(mut commands: Command, mut query: Query<Entity>) {
+        fn despawn_sys(mut commands: Command, query: Query<Entity>) {
             for e in query.iter() {
                 commands.despawn(e);
             }

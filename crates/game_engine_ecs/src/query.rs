@@ -5,6 +5,7 @@ use crate::entity::Entity;
 use crate::system::UnsafeWorldCell;
 use crate::world::World;
 
+use std::cell::{RefCell, RefMut};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
@@ -99,6 +100,23 @@ pub trait QueryToken {
     /// The static metadata type.
     type Persistent: QueryData;
 }
+
+/// Marker trait for QueryTokens that do not require exclusive access.
+/// This allows the query to be iterated via `&self`.
+/// # Safety
+/// Implementors must ensure the View does not return `&mut T`.
+pub unsafe trait ReadOnly {}
+
+unsafe impl<T: Component> ReadOnly for &T {}
+unsafe impl ReadOnly for Entity {}
+unsafe impl<T: QueryToken> ReadOnly for Option<T> where T: ReadOnly {}
+
+macro_rules! impl_readonly_tuples {
+    ($($name:ident $num:tt),*) => {
+        unsafe impl<$($name: ReadOnly),*> ReadOnly for ($($name,)*) {}
+    }
+}
+auto_impl_all_tuples!(impl_readonly_tuples);
 
 // ============================================================================
 // Token and static impls
@@ -378,21 +396,25 @@ impl<'a> Fetch<'a> for EntityFetch<'a> {
 // The QueryInner Struct (Stores Static Data & State)
 // ============================================================================
 
+#[derive(Debug)]
+struct QueryStateInternal {
+    cached_archetypes: Vec<ArchetypeId>,
+    last_updated_arch_idx: ArchetypeId,
+    borrow_checker: ColumnBorrowChecker,
+}
+
 /// `QueryInner` acts as the persistent state for a system query.
 ///
 /// It holds:
 /// 1. **Static Metadata**: Component IDs and Masks required for Views (`QD`) and Filters (`FD`).
-/// 2. **State**: A cache of matching `ArchetypeId`s to avoid scanning all archetypes every frame.
-/// 3. **Safety**: A `ColumnBorrowChecker` to ensure this query doesn't violate aliasing rules
-///    (e.g., mutable access to the same component twice).
+/// 2. **Dynamic State**: Cached archetypes and borrow state, wrapped in RefCell for interior mutability.
 ///
 /// This struct is `Send + Sync` because it only holds metadata, not actual component references.
 #[derive(Debug)]
 pub struct QueryInner<QD: QueryData, FD: FilterData = ()> {
-    cached_archetypes: Vec<ArchetypeId>,
-    last_updated_arch_idx: ArchetypeId,
-    /// Helper to track which columns are borrowed during iteration.
-    borrow_checker: ColumnBorrowChecker,
+    /// Internal mutable state (cache, borrow checker).
+    state: RefCell<QueryStateInternal>,
+
     /// Mask of components required by the View (e.g., `&Position`, `&mut Velocity`).
     view_required: ComponentMask,
     /// Mask of components required by the Filter (e.g., `With<Player>`).
@@ -432,9 +454,11 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         borrow_checker.overlay(&filter_borrow_checker);
 
         Self {
-            borrow_checker,
-            cached_archetypes: Vec::new(),
-            last_updated_arch_idx: ArchetypeId(0),
+            state: RefCell::new(QueryStateInternal {
+                cached_archetypes: Vec::new(),
+                last_updated_arch_idx: ArchetypeId(0),
+                borrow_checker,
+            }),
             view_required: ComponentMask::from_ids(&view_required),
             filter_required: ComponentMask::from_ids(&filter_required),
             filter_excluded: ComponentMask::from_ids(&filter_excluded),
@@ -443,16 +467,16 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     }
 
     /// Scans new archetypes in the World since the last update and adds matches to the cache.
-    fn update_archetype_cache(&mut self, world: &World) {
-        if self.last_updated_arch_idx.0 == world.archetypes.len() {
+    fn update_archetype_cache(&self, world: &World, state: &mut QueryStateInternal) {
+        if state.last_updated_arch_idx.0 == world.archetypes.len() {
             return;
         }
-        for arch in world.archetypes.since(self.last_updated_arch_idx) {
+        for arch in world.archetypes.since(state.last_updated_arch_idx) {
             if self.check_archetype(arch) {
-                self.cached_archetypes.push(arch.id);
+                state.cached_archetypes.push(arch.id);
             }
         }
-        self.last_updated_arch_idx.0 = world.archetypes.len();
+        state.last_updated_arch_idx.0 = world.archetypes.len();
     }
 
     /// Checks if a specific archetype matches the View and Filter requirements.
@@ -475,10 +499,10 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     /// Validates that the query's borrow requirements do not conflict internally.
     /// Also applies these borrows to the matching archetypes in the world to ensure
     /// runtime safety against other simultaneous queries (if we were multi-threaded without a scheduler).
-    pub(crate) fn borrow_check(&mut self, world: &mut World) -> bool {
-        for &arch_id in &self.cached_archetypes {
+    pub(crate) fn borrow_check(&self, world: &mut World, state: &mut QueryStateInternal) -> bool {
+        for &arch_id in &state.cached_archetypes {
             let arch = &mut world.archetypes[arch_id];
-            if !self.borrow_checker.apply_borrow(arch) {
+            if !state.borrow_checker.apply_borrow(arch) {
                 return false;
             }
         }
@@ -488,19 +512,21 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     /// Returns a list of borrows needed by this query. Used by the `Scheduler` to
     /// determine which systems can run in parallel.
     pub(crate) fn granular_borrow_check(
-        &mut self,
+        &self,
         world: &World,
         start_from: ArchetypeId,
     ) -> Vec<(ArchetypeId, ColumnBorrowChecker)> {
-        self.update_archetype_cache(world);
+        let mut state = self.state.borrow_mut();
+        self.update_archetype_cache(world, &mut state);
 
-        self.cached_archetypes
+        state
+            .cached_archetypes
             .iter()
             .filter(|&&id| id >= start_from)
             .copied()
             .map(|arch_id| {
                 let arch = &world.archetypes[arch_id];
-                (arch_id, self.borrow_checker.for_archetype(arch))
+                (arch_id, state.borrow_checker.for_archetype(arch))
             })
             .collect()
     }
@@ -511,23 +537,28 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     /// * `V`: The Dynamic View type (e.g., `&'a Position`).
     /// * `F`: The Dynamic Filter type (e.g., `Changed<Velocity>`).
     pub fn iter<'a, V: View<'a>, F: Filter<Persistent = FD>>(
-        &'a mut self,
+        &'a self,
         world: &'a UnsafeWorldCell<'a>,
         tick: u32,
     ) -> QueryIter<'a, V, F> {
-        self.update_archetype_cache(unsafe { world.world() });
+        let mut state_guard = self.state.borrow_mut();
 
-        // Runtime Borrow Check: Locks the columns in the archetypes.
-        // If this fails, it means another iterator is holding a conflicting lock.
-        if !self.borrow_check(unsafe { world.world_mut() }) {
+        self.update_archetype_cache(unsafe { world.world() }, &mut state_guard);
+
+        if !self.borrow_check(unsafe { world.world_mut() }, &mut state_guard) {
             panic!("Query borrow conflict detected");
         }
 
+        // Pointer Setup for the Iterator
+        let archetype_ids_ptr = state_guard.cached_archetypes.as_slice() as *const [ArchetypeId];
+        let borrow_checker_ptr = &mut state_guard.borrow_checker as *mut ColumnBorrowChecker;
+
         QueryIter {
             world,
-            archetype_ids: &self.cached_archetypes,
+            _state_guard: state_guard,
+            archetype_ids: archetype_ids_ptr,
             current_arch_idx: 0,
-            borrow_checker: &mut self.borrow_checker,
+            borrow_checker: borrow_checker_ptr,
             current_fetch: None,
             current_skip_filter: None,
             current_len: 0,
@@ -540,20 +571,22 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     /// This is often faster than `iter()` because it avoids strict iterator state management
     /// and compiler optimization barriers.
     pub fn for_each<'a, V: View<'a>, F: Filter<Persistent = FD>, Func>(
-        &'a mut self,
+        &'a self,
         world: &'a UnsafeWorldCell<'a>,
         mut func: Func,
         tick: u32,
     ) where
         Func: FnMut(V::Item),
     {
-        self.update_archetype_cache(unsafe { world.world() });
-        if !self.borrow_check(unsafe { world.world_mut() }) {
+        let mut state = self.state.borrow_mut();
+
+        self.update_archetype_cache(unsafe { world.world() }, &mut state);
+        if !self.borrow_check(unsafe { world.world_mut() }, &mut state) {
             panic!("Query borrow conflict detected");
         }
 
         // Capture tick before update for filter logic
-        for &arch_id in &self.cached_archetypes {
+        for &arch_id in &state.cached_archetypes {
             // SAFETY: We iterate distinct archetypes sequentially.
             let arch = unsafe { &mut world.world_mut().archetypes[arch_id] } as *mut Archetype;
 
@@ -597,16 +630,20 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             }
         }
 
-        self.release_borrows(unsafe { world.world_mut() });
+        self.release_borrows(unsafe { world.world_mut() }, &mut state);
     }
 
     /// Fetches a specific entity's data if it matches the query.
     pub fn get<'a, V: View<'a>, F: Filter<Persistent = FD>>(
-        &'a mut self,
+        &'a self,
         world: &'a UnsafeWorldCell<'a>,
         entity: Entity,
         tick: u32,
     ) -> Option<GetGuard<'a, V::Item>> {
+        // We only need the state lock to update cache/check masks and get raw borrows.
+        // We DO NOT hold the lock while returning the GetGuard.
+        let mut state = self.state.borrow_mut();
+
         let location = unsafe { world.world().entity_location(entity) }?;
 
         let arch_id = location.archetype_id();
@@ -617,7 +654,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             return None;
         }
 
-        if !self.borrow_checker.apply_borrow(unsafe { &*arch }) {
+        if !state.borrow_checker.apply_borrow(unsafe { &*arch }) {
             panic!("Query borrow conflict detected");
         }
 
@@ -626,7 +663,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             unsafe { V::create_fetch(arch, &world.world().registry, world.world().tick()) }?;
 
         // Retrieve the atomic borrow states so `GetGuard` can release them later
-        let raw_borrows = self.borrow_checker.get_raw_borrows(unsafe { &*arch });
+        let raw_borrows = state.borrow_checker.get_raw_borrows(unsafe { &*arch });
 
         if let Some(mut skip_filter) =
             unsafe { F::create_skip_filter(arch, &world.world().registry, tick) }
@@ -636,7 +673,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             if skip_filter.should_skip() {
                 // Entity is filtered out
                 // Release local borrows before returning
-                self.borrow_checker.release_borrow(unsafe { &mut *arch });
+                state.borrow_checker.release_borrow(unsafe { &mut *arch });
                 return None;
             }
         }
@@ -647,15 +684,15 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     }
 
     /// Releases locks on all cached archetypes. Called when Iterators/Guards drop.
-    fn release_borrows(&mut self, world: &mut World) {
-        for &arch_id in &self.cached_archetypes {
+    fn release_borrows(&self, world: &mut World, state: &mut QueryStateInternal) {
+        for &arch_id in &state.cached_archetypes {
             let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
-            self.borrow_checker.release_borrow(arch);
+            state.borrow_checker.release_borrow(arch);
         }
     }
 
     pub(crate) fn last_updated_arch_idx(&self) -> ArchetypeId {
-        self.last_updated_arch_idx
+        self.state.borrow().last_updated_arch_idx
     }
 }
 
@@ -714,14 +751,19 @@ impl<'a, T> GetGuard<'a, T> {
 pub struct QueryIter<'a, V: View<'a>, F: Filter> {
     /// Reference to the world to access archetypes.
     world: &'a UnsafeWorldCell<'a>,
+
+    /// Guard ensuring exclusive access to the QueryInner state during iteration.
+    _state_guard: RefMut<'a, QueryStateInternal>,
+
     /// List of archetypes that match the query requirements.
-    archetype_ids: &'a [ArchetypeId],
+    archetype_ids: *const [ArchetypeId],
+
     /// Index of the archetype we are currently iterating.
     current_arch_idx: usize,
     /// The tick used for filter change detection.
     last_query_tick: u32,
     /// Reference to the checker in `QueryInner` to release borrows on drop.
-    borrow_checker: &'a mut ColumnBorrowChecker,
+    borrow_checker: *mut ColumnBorrowChecker,
 
     /// The Fetch object for the current archetype. Holds raw pointers to columns.
     current_fetch: Option<V::Fetch>,
@@ -764,11 +806,11 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
             }
 
             // 2. Current archetype exhausted or not set. Move to next.
-            if self.current_arch_idx >= self.archetype_ids.len() {
+            if self.current_arch_idx >= unsafe { (&(*self.archetype_ids)).len() } {
                 return None;
             }
 
-            let arch_id = self.archetype_ids[self.current_arch_idx];
+            let arch_id = unsafe { (*self.archetype_ids)[self.current_arch_idx] };
             self.current_arch_idx += 1;
 
             // SAFETY: See comment in `QueryInner::for_each`.
@@ -801,13 +843,13 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
 impl<'a, V: View<'a>, F: Filter> Drop for QueryIter<'a, V, F> {
     fn drop(&mut self) {
         // Critical: Release the runtime locks on all archetypes we touched.
-        for &arch_id in self.archetype_ids {
+        for &arch_id in unsafe { &*self.archetype_ids } {
             let arch = unsafe {
                 &mut *(&mut self.world.world_mut().archetypes[arch_id] as *mut Archetype)
             };
-            self.borrow_checker.release_borrow(arch);
+            unsafe { &mut *self.borrow_checker }.release_borrow(arch);
         }
-        self.borrow_checker.clear();
+        unsafe { &mut *self.borrow_checker }.clear();
     }
 }
 // ============================================================================
@@ -1122,15 +1164,18 @@ impl<'w, Q: QueryToken, F: Filter> QueryState<'w, Q, F> {
         }
     }
 
-    pub fn iter(&mut self) -> QueryIter<'_, Q::View<'_>, F> {
+    pub fn iter_mut(&mut self) -> QueryIter<'_, Q::View<'_>, F> {
         self.inner.iter::<Q::View<'_>, F>(&self.world, 0)
     }
 
-    pub fn get(&mut self, entity: Entity) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
+    pub fn get_mut(
+        &mut self,
+        entity: Entity,
+    ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
         self.inner.get::<Q::View<'_>, F>(&self.world, entity, 0)
     }
 
-    pub fn for_each<'a, Func>(&'a mut self, func: Func)
+    pub fn for_each_mut<'a, Func>(&'a mut self, func: Func)
     where
         Func: FnMut(<Q::View<'a> as View<'a>>::Item),
     {
@@ -1138,6 +1183,26 @@ impl<'w, Q: QueryToken, F: Filter> QueryState<'w, Q, F> {
             .for_each::<Q::View<'a>, F, Func>(&self.world, func, 0)
     }
 }
+
+impl<'w, Q: QueryToken, F: Filter> QueryState<'w, Q, F>
+where
+    Q: ReadOnly,
+{
+    pub fn iter(&self) -> QueryIter<'_, Q::View<'_>, F> {
+        self.inner.iter::<Q::View<'_>, F>(&self.world, 0)
+    }
+    pub fn get(&self, entity: Entity) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
+        self.inner.get::<Q::View<'_>, F>(&self.world, entity, 0)
+    }
+    pub fn for_each<'a, Func>(&'a self, func: Func)
+    where
+        Func: FnMut(<Q::View<'a> as View<'a>>::Item),
+    {
+        self.inner
+            .for_each::<Q::View<'a>, F, Func>(&self.world, func, 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -1189,7 +1254,7 @@ mod tests {
         // Archetype 3: Pos, Vel, Player
         world.spawn((Pos { x: 5.0, y: 5.0 }, Vel { x: 0.0, y: 1.0 }, Player));
 
-        let mut query = QueryState::<(&Pos, &Vel)>::new(&mut world);
+        let query = QueryState::<(&Pos, &Vel)>::new(&mut world);
 
         let mut count = 0;
         for (pos, vel) in query.iter() {
@@ -1214,13 +1279,13 @@ mod tests {
         let mut query = QueryState::<(&mut Pos, &Vel)>::new(&mut world);
 
         // Apply Velocity
-        for (mut pos, vel) in query.iter() {
+        for (mut pos, vel) in query.iter_mut() {
             pos.x += vel.x;
             pos.y += vel.y;
         }
 
         // Verify result with immutable query
-        let mut check = QueryState::<&Pos>::new(&mut world);
+        let check = QueryState::<&Pos>::new(&mut world);
         let pos = check.iter().next().unwrap();
 
         assert_eq!(pos.x, 1.0);
@@ -1236,7 +1301,7 @@ mod tests {
         let mut query = QueryState::<(&mut u32, &f32)>::new(&mut world);
 
         // Test Match
-        if let Some(mut guard) = query.get(e1) {
+        if let Some(mut guard) = query.get_mut(e1) {
             let (val, _) = &mut *guard;
             **val += 100;
         } else {
@@ -1244,16 +1309,16 @@ mod tests {
         }
 
         // Verify mutation
-        if let Some(guard) = query.get(e1) {
+        if let Some(guard) = query.get_mut(e1) {
             assert_eq!(*guard.0, 110);
         }
 
         // Test Mismatch
-        assert!(query.get(e2).is_none(), "Entity 2 missing component");
+        assert!(query.get_mut(e2).is_none(), "Entity 2 missing component");
 
         // Test Despawned
         assert!(unsafe { query.world.world_mut() }.despawn(e1));
-        assert!(query.get(e1).is_none(), "Entity 1 is dead");
+        assert!(query.get_mut(e1).is_none(), "Entity 1 is dead");
     }
 
     // ========================================================================
@@ -1272,7 +1337,7 @@ mod tests {
         world.spawn((Player, Dead, Pos { x: 3.0, y: 0.0 }));
 
         // Query: Get Pos for Players who are NOT Dead
-        let mut query = QueryState::<&Pos, (With<Player>, Without<Dead>)>::new(&mut world);
+        let query = QueryState::<&Pos, (With<Player>, Without<Dead>)>::new(&mut world);
 
         let results: Vec<f32> = query.iter().map(|p| p.x).collect();
 
@@ -1292,7 +1357,7 @@ mod tests {
 
         // Logic: (With<Player> AND Without<Dead>)
         // Note: Tuple filters imply AND logic.
-        let mut query = QueryState::<(&Pos, &Vel), (With<Player>, Without<Dead>)>::new(&mut world);
+        let query = QueryState::<(&Pos, &Vel), (With<Player>, Without<Dead>)>::new(&mut world);
 
         assert_eq!(query.iter().count(), 1);
     }
@@ -1308,7 +1373,7 @@ mod tests {
     #[test]
     fn test_archetype_fragmentation() {
         let mut world = World::new();
-        let mut query = QueryState::<&Pos>::new(&mut world);
+        let query = QueryState::<&Pos>::new(&mut world);
 
         // 1. Spawn Arch A
         unsafe { query.world.world_mut().spawn((Pos { x: 1.0, y: 0.0 },)) };
@@ -1343,7 +1408,7 @@ mod tests {
         world.spawn((2u32, true)); // Match
         world.spawn((3u32, "Str")); // Match
 
-        let mut query = QueryState::<&u32>::new(&mut world);
+        let query = QueryState::<&u32>::new(&mut world);
         let sum: u32 = query.iter().sum();
 
         assert_eq!(sum, 1 + 2 + 3);
@@ -1361,7 +1426,7 @@ mod tests {
 
         // Cannot borrow &mut Pos and &mut Pos
         let mut query = QueryState::<(&mut Pos, &mut Pos)>::new(&mut world);
-        query.iter();
+        query.iter_mut();
     }
 
     #[test]
@@ -1372,7 +1437,7 @@ mod tests {
 
         // Cannot borrow &mut Pos and &Pos
         let mut query = QueryState::<(&mut Pos, &Pos)>::new(&mut world);
-        query.iter();
+        query.iter_mut();
     }
 
     #[test]
@@ -1381,7 +1446,7 @@ mod tests {
         world.spawn((Pos { x: 10., y: 10. },));
 
         // Shared access is fine
-        let mut query = QueryState::<(&Pos, &Pos)>::new(&mut world);
+        let query = QueryState::<(&Pos, &Pos)>::new(&mut world);
         for (p1, p2) in query.iter() {
             assert_eq!(p1, p2);
         }
@@ -1396,7 +1461,7 @@ mod tests {
         world.spawn((10u32, Dead));
         world.spawn((20u32,));
 
-        let mut query = QueryState::<(&u32, &Dead)>::new(&mut world);
+        let query = QueryState::<(&u32, &Dead)>::new(&mut world);
         let count = query.iter().count();
         assert_eq!(count, 1);
     }
@@ -1428,7 +1493,7 @@ mod tests {
         world.spawn((Health(120), Mana(100), Hero));
 
         // Query: Everyone has Health, Mana is optional
-        let mut query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
+        let query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
 
         let mut count_with_mana = 0;
         let mut count_without_mana = 0;
@@ -1467,14 +1532,14 @@ mod tests {
         let mut query = QueryState::<(&Health, Option<&mut Mana>)>::new(&mut world);
 
         // Regenerate mana if they have it
-        for (_hp, mana_opt) in query.iter() {
+        for (_hp, mana_opt) in query.iter_mut() {
             if let Some(mut mana) = mana_opt {
                 mana.0 += 5;
             }
         }
 
         // Verify Mage updated
-        let mut check_query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
+        let check_query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
         for (hp, mana_opt) in check_query.iter() {
             if hp.0 == 50 {
                 assert_eq!(mana_opt.unwrap().0, 15, "Mage should have regenerated mana");
@@ -1498,7 +1563,7 @@ mod tests {
         world.spawn((Health(10),));
 
         // Query: Health (Req), Mana (Opt), Shield (Opt)
-        let mut query = QueryState::<(&Health, Option<&Mana>, Option<&Shield>)>::new(&mut world);
+        let query = QueryState::<(&Health, Option<&Mana>, Option<&Shield>)>::new(&mut world);
 
         let mut results = Vec::new();
         for (_, mana, shield) in query.iter() {
@@ -1530,7 +1595,7 @@ mod tests {
         // Query: Get Option<Mana>, but Filter With<Mana>.
         // This is redundant practically, but effectively tests that Option doesn't override Filter.
         // Expectation: Option returns Some(), because Filter removed the None cases.
-        let mut query = QueryState::<Option<&Mana>, With<Mana>>::new(&mut world);
+        let query = QueryState::<Option<&Mana>, With<Mana>>::new(&mut world);
         assert_eq!(query.iter().count(), 1);
         for mana in query.iter() {
             assert!(mana.is_some());
@@ -1538,7 +1603,7 @@ mod tests {
 
         // Query: Get Option<Mana>, Filter Without<Mana>.
         // Expectation: Option returns None, because Filter removed the Some cases.
-        let mut query_none = QueryState::<Option<&Mana>, Without<Mana>>::new(&mut world);
+        let query_none = QueryState::<Option<&Mana>, Without<Mana>>::new(&mut world);
         assert_eq!(query_none.iter().count(), 1);
         for mana in query_none.iter() {
             assert!(mana.is_none());
@@ -1551,7 +1616,7 @@ mod tests {
         let e_full = world.spawn((Health(100), Mana(50)));
         let e_partial = world.spawn((Health(80),));
 
-        let mut query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
+        let query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
 
         // Test Full Entity
         let guard = query.get(e_full).expect("Entity should exist");
@@ -1572,7 +1637,7 @@ mod tests {
         world.spawn((Health(20),));
 
         // Querying for something no one has
-        let mut query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
+        let query = QueryState::<(&Health, Option<&Mana>)>::new(&mut world);
 
         let count = query.iter().count();
         assert_eq!(count, 2);

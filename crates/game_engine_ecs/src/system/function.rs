@@ -212,7 +212,7 @@ mod function_tests {
     // The `SystemParamFunction` impl projects these to specific lifetimes at runtime.
 
     fn movement_system(mut query: Query<(&mut Position, &Velocity)>) {
-        for (mut pos, vel) in query.iter() {
+        for (mut pos, vel) in query.iter_mut() {
             pos.x += vel.x;
             pos.y += vel.y;
         }
@@ -225,7 +225,7 @@ mod function_tests {
     fn complex_system(count: Res<FrameCount>, mut query: Query<&mut Position>) {
         // Only run if frame > 0
         if count.0 > 0 {
-            for mut pos in query.iter() {
+            for mut pos in query.iter_mut() {
                 pos.x += 100.0;
             }
         }
@@ -252,7 +252,7 @@ mod function_tests {
         }
 
         // 4. Verify Side Effects via standard QueryState
-        let mut q = QueryState::<&Position>::new(&mut world);
+        let q = QueryState::<&Position>::new(&mut world);
         let pos = q.iter().next().unwrap();
 
         assert_eq!(pos.x, 1.0);
@@ -309,7 +309,7 @@ mod function_tests {
             assert_eq!(res.0, 1);
         }
 
-        let mut q = QueryState::<&Position>::new(&mut app.world);
+        let q = QueryState::<&Position>::new(&mut app.world);
         let pos = q.iter().next().unwrap();
         assert_eq!(pos.x, 101.0);
     }
@@ -328,7 +328,7 @@ mod function_tests {
     // ========================================================================
 
     fn changed_tracker_system(
-        mut query: Query<&Position, Changed<Position>>,
+        query: Query<&Position, Changed<Position>>,
         mut count: ResMut<FrameCount>,
     ) {
         for _ in query.iter() {
@@ -383,7 +383,7 @@ mod function_tests {
         {
             // Mutate manually via direct world access to simulate another system
             let mut q = QueryState::<&mut Position>::new(&mut app.world);
-            let mut pos = q.get(e).unwrap();
+            let mut pos = q.get_mut(e).unwrap();
             pos.x += 1.0;
             // Guard drop updates component tick to 3
         }

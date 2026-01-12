@@ -4,7 +4,7 @@ pub mod function;
 use crate::archetype::ArchetypeId;
 use crate::borrow::ColumnBorrowChecker;
 use crate::prelude::{Res, ResMut, Resource};
-use crate::query::{Filter, GetGuard, QueryInner, QueryIter, QueryToken, View};
+use crate::query::{Filter, GetGuard, QueryInner, QueryIter, QueryToken, ReadOnly, View};
 use crate::world::World;
 use std::any::TypeId;
 use std::collections::HashSet;
@@ -217,22 +217,89 @@ impl<T: Send + Sync + 'static> SystemParam for ResMut<'_, T> {
 }
 
 pub struct Query<'w, Q: QueryToken, F: Filter = ()> {
-    // Maps Q -> Q::Persistent (The static data struct)
-    query: &'w mut QueryInner<Q::Persistent, F::Persistent>,
+    // Now uses a shared reference because QueryInner uses RefCell interior mutability
+    query: &'w QueryInner<Q::Persistent, F::Persistent>,
     world: &'w UnsafeWorldCell<'w>,
     tick: u32,
 }
 
+impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
+    /// Returns an iterator over the query results.
+    /// Requires &mut self for queries containing &mut T.
+    pub fn iter_mut(&mut self) -> QueryIter<'_, Q::View<'_>, F> {
+        // Safety: at this point the column borrow checks have been done by the scheduler.
+        debug_assert!(
+            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
+        );
+        self.query.iter::<Q::View<'_>, F>(self.world, self.tick)
+    }
+
+    /// Runs a closure for each item in the query.
+    /// Requires &mut self for queries containing &mut T.
+    pub fn for_each_mut<'a, Func>(&'a mut self, func: Func)
+    where
+        Func: FnMut(<Q::View<'a> as View<'a>>::Item),
+    {
+        let world = unsafe { self.world.world_mut() };
+        debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
+        self.query
+            .for_each::<Q::View<'a>, F, Func>(self.world, func, self.tick)
+    }
+
+    /// Get a specific entity's query item, if it exists.
+    /// Requires &mut self for queries containing &mut T.
+    pub fn get_mut(
+        &mut self,
+        entity: crate::entity::Entity,
+    ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
+        debug_assert!(
+            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
+        );
+        self.query
+            .get::<Q::View<'_>, F>(self.world, entity, self.tick)
+    }
+}
+
+/// Methods available when the query only contains read-only data (e.g., &T, Entity).
+impl<'w, Q: QueryToken + ReadOnly, F: Filter> Query<'w, Q, F> {
+    pub fn iter(&self) -> QueryIter<'_, Q::View<'_>, F> {
+        debug_assert!(
+            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
+        );
+        self.query.iter::<Q::View<'_>, F>(self.world, self.tick)
+    }
+
+    pub fn for_each<'a, Func>(&'a self, func: Func)
+    where
+        Func: FnMut(<Q::View<'a> as View<'a>>::Item),
+    {
+        debug_assert!(
+            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
+        );
+        self.query
+            .for_each::<Q::View<'a>, F, Func>(self.world, func, self.tick)
+    }
+
+    pub fn get(
+        &self,
+        entity: crate::entity::Entity,
+    ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
+        debug_assert!(
+            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
+        );
+        self.query
+            .get::<Q::View<'_>, F>(self.world, entity, self.tick)
+    }
+}
+
 impl<Q: QueryToken, F: Filter> SystemParam for Query<'_, Q, F> {
-    /// Query_inner, Last known archetype idx, World tick of last system run
     type State = (QueryInner<Q::Persistent, F::Persistent>, ArchetypeId, u32);
     type Item<'w> = Query<'w, Q, F>;
 
     const DYNAMIC: bool = true;
 
     fn init_state(world: &mut World, access: &mut SystemAccess) -> Self::State {
-        // Use the factory method to create the static Inner from dynamic types
-        let mut query = QueryInner::new::<Q, F>(&mut world.registry);
+        let query = QueryInner::new::<Q, F>(&mut world.registry);
 
         for (id, col) in query.granular_borrow_check(world, ArchetypeId(0)) {
             access.col[id.0].extend(&col);
@@ -250,68 +317,30 @@ impl<Q: QueryToken, F: Filter> SystemParam for Query<'_, Q, F> {
         world: &'w UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
         let res = Query {
-            query: &mut state.0,
+            query: &state.0,
             world,
             tick: state.2,
         };
-        // SAFETY: The scheduler ensures that the tick is static during this system run.
         state.2 = unsafe { world.world().tick() };
         res
     }
 
     fn update_access(state: &mut Self::State, world: &World, access: &mut SystemAccess) -> bool {
         let mut changed = false;
-        if *state.0.last_updated_arch_idx() != world.archetypes.len() {
+        if state.0.last_updated_arch_idx().0 != world.archetypes.len() {
             for (id, col) in state.0.granular_borrow_check(world, state.1) {
-                changed = if let Some(system_col) = access.col.get_mut(id.0) {
-                    system_col.extend(&col)
+                if let Some(system_col) = access.col.get_mut(id.0) {
+                    if system_col.extend(&col) {
+                        changed = true;
+                    }
                 } else {
-                    // New archetype added since last frame, extend the access vector
                     access.col.push(col);
-                    true
+                    changed = true;
                 };
             }
         }
         state.1 = ArchetypeId(world.archetypes.len());
         changed
-    }
-}
-
-impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
-    /// Returns an iterator over the query results.
-    /// If you are doing a for loop over this, consider using
-    /// for_each instead to have a more optimized hot loop iteration.
-    pub fn iter(&mut self) -> QueryIter<'_, Q::View<'_>, F> {
-        // Saftety at this point the column borrow checks have been done by the scheduler.
-        debug_assert!(
-            unsafe { self.world.world().archetypes.len() } == self.query.last_updated_arch_idx().0
-        );
-        // Explicitly pass the View and Filter types to the generic iter method
-        self.query.iter::<Q::View<'_>, F>(self.world, self.tick)
-    }
-
-    /// runs a closure for each item in the query.
-    pub fn for_each<'a, Func>(&'a mut self, func: Func)
-    where
-        Func: FnMut(<Q::View<'a> as View<'a>>::Item),
-    {
-        // Saftety at this point the column borrow checks have been done by the scheduler.
-        let world = unsafe { self.world.world_mut() };
-        debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
-        self.query
-            .for_each::<Q::View<'a>, F, Func>(self.world, func, self.tick)
-    }
-
-    /// get a specific entity's query item, if it exists.
-    pub fn get(
-        &mut self,
-        entity: crate::prelude::Entity,
-    ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
-        let world = unsafe { self.world.world_mut() };
-        debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0);
-        // debug_assert!(world.archetypes.len() == self.query.last_updated_arch_idx().0 as usize);
-        self.query
-            .get::<Q::View<'_>, F>(self.world, entity, self.tick)
     }
 }
 

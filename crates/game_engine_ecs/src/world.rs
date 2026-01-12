@@ -899,7 +899,7 @@ mod world_tests {
         assert!(world.entities().len() >= count);
 
         // Assert: Data Integrity via Query (The real truth source)
-        let mut query = QueryState::<(&Pos, &Vel)>::new(&mut world);
+        let query = QueryState::<(&Pos, &Vel)>::new(&mut world);
         assert_eq!(query.iter().count(), count);
     }
 
@@ -935,7 +935,7 @@ mod world_tests {
         let expected_user_count = batch_size + 2;
 
         // Check actual live entities in query
-        let mut q_all = QueryState::<Entity>::new(&mut world);
+        let q_all = QueryState::<Entity>::new(&mut world);
         assert_eq!(q_all.iter().count(), expected_user_count);
 
         // Check Entity Allocator State
@@ -943,7 +943,7 @@ mod world_tests {
         assert!(world.entities().len() >= expected_user_count);
 
         // Data Checks...
-        let mut q_health = QueryState::<&Health>::new(&mut world);
+        let q_health = QueryState::<&Health>::new(&mut world);
         assert_eq!(q_health.get(e1).unwrap().0, 100.0);
         assert_eq!(q_health.get(e2).unwrap().0, 50.0);
     }
@@ -964,7 +964,7 @@ mod world_tests {
 
         assert_eq!(entities.len(), count);
 
-        let mut query = QueryState::<&Marker>::new(&mut world);
+        let query = QueryState::<&Marker>::new(&mut world);
         assert_eq!(query.iter().count(), count);
     }
 
@@ -1007,7 +1007,7 @@ mod world_tests {
 
         world.spawn_batch(batch);
 
-        let mut query = QueryState::<(&Pos, &Vel)>::new(&mut world);
+        let query = QueryState::<(&Pos, &Vel)>::new(&mut world);
         for (pos, vel) in query.iter() {
             // Pos.x should be 100 (from 2nd slot in tuple)
             assert_eq!(pos.x, 100.0);
@@ -1099,7 +1099,7 @@ mod world_tests {
         assert_eq!(entities.len(), count);
 
         // Verify Data
-        let mut query = world.query::<(&Pos, &Tag), ()>();
+        let query = world.query::<(&Pos, &Tag), ()>();
         let mut seen = 0;
         query.for_each(|(pos, tag)| {
             assert_eq!(pos.x, tag.0 as f32);
@@ -1132,7 +1132,7 @@ mod world_tests {
 
         world.spawn_batch(batch);
 
-        let mut query = world.query::<(&Pos, &Vel), ()>();
+        let query = world.query::<(&Pos, &Vel), ()>();
         query.for_each(|(pos, vel)| {
             assert_eq!(pos.x, 100.0); // Should be the Pos value
             assert_eq!(vel.x, vel.y); // Should be the Vel value
@@ -1160,7 +1160,7 @@ mod world_tests {
         assert!(world.entity_location(e1).is_none());
 
         // Query should NOT see it
-        let mut q = world.query::<&Pos, ()>();
+        let q = world.query::<&Pos, ()>();
         let count = q.iter().count();
         assert_eq!(count, 0);
 
@@ -1172,7 +1172,7 @@ mod world_tests {
         assert!(world.entity_location(e1).is_some());
 
         // Query SHOULD see it
-        let mut q = world.query::<&Pos, ()>();
+        let q = world.query::<&Pos, ()>();
         let mut found = false;
         q.for_each(|pos| {
             assert_eq!(pos.x, 5.0);
@@ -1192,10 +1192,10 @@ mod world_tests {
 
         world.flush();
 
-        let mut q_pos = world.query::<&Pos, ()>();
+        let q_pos = world.query::<&Pos, ()>();
         assert_eq!(q_pos.iter().count(), 2);
 
-        let mut q_vel = world.query::<&Vel, ()>();
+        let q_vel = world.query::<&Vel, ()>();
         assert_eq!(q_vel.iter().count(), 1);
 
         // Ensure data integrity
@@ -1214,13 +1214,13 @@ mod world_tests {
         world.spawn_deferred((Tag(1),));
         world.flush();
 
-        let mut q = world.query::<&Tag, ()>();
+        let q = world.query::<&Tag, ()>();
         assert_eq!(q.iter().count(), 1);
 
         world.spawn_deferred((Tag(2),));
         world.flush();
 
-        let mut q = world.query::<&Tag, ()>();
+        let q = world.query::<&Tag, ()>();
         assert_eq!(q.iter().count(), 2);
     }
 
@@ -1267,7 +1267,7 @@ mod world_tests {
         world.insert_component(e, Vel { x: 1.0, y: 0.0 });
 
         // 3. Verify both components exist and data is correct
-        let mut query = world.query::<(&Pos, &Vel), ()>();
+        let query = world.query::<(&Pos, &Vel), ()>();
         let (pos, vel) = *query.get(e).expect("Entity should have both components");
 
         assert_eq!(pos.x, 10.0);
@@ -1310,7 +1310,7 @@ mod world_tests {
 
         // Verify E1 has both
         {
-            let mut q = world.query::<(&Pos, &Vel), ()>();
+            let q = world.query::<(&Pos, &Vel), ()>();
             assert!(q.get(e1).is_some());
         }
 
@@ -1318,7 +1318,7 @@ mod world_tests {
         // If the location index wasn't updated, looking up E2 might point to Row 1,
         // which is now out of bounds (len is 1).
         {
-            let mut q = world.query::<&Pos, ()>();
+            let q = world.query::<&Pos, ()>();
             let pos = q.get(e2).expect("E2 should still exist and be accessible");
             assert_eq!(pos.x, 2.0);
         }
@@ -1336,7 +1336,7 @@ mod world_tests {
 
         world.insert_component(e, Health(100.0));
 
-        let mut q = world.query::<&Health, ()>();
+        let q = world.query::<&Health, ()>();
         assert_eq!(q.get(e).unwrap().0, 100.0);
     }
 
@@ -1370,13 +1370,13 @@ mod world_tests {
         // The insert should have been ignored.
         // If it succeeded, the entity would have Vel. If ignored, only Pos.
 
-        let mut q_vel = world.query::<&Vel, ()>();
+        let q_vel = world.query::<&Vel, ()>();
         assert!(
             q_vel.get(e).is_none(),
             "Component insertion should be ignored on uninitialized entities"
         );
 
-        let mut q_pos = world.query::<&Pos, ()>();
+        let q_pos = world.query::<&Pos, ()>();
         assert!(
             q_pos.get(e).is_some(),
             "Original deferred component should exist"
@@ -1394,11 +1394,11 @@ mod world_tests {
         world.remove_component::<Vel>(e);
 
         // Check Pos still exists and data is intact
-        let mut q_pos = world.query::<&Pos, ()>();
+        let q_pos = world.query::<&Pos, ()>();
         assert_eq!(q_pos.get(e).unwrap().x, 10.0);
 
         // Check Vel is gone
-        let mut q_vel = world.query::<&Vel, ()>();
+        let q_vel = world.query::<&Vel, ()>();
         assert!(q_vel.get(e).is_none());
 
         // Check Archetype changed
@@ -1447,7 +1447,7 @@ mod world_tests {
         // 2. Verify E2 is still accessible and has correct data
         // If the swap logic failed, E2's location would still point to Row 1, which is now invalid/empty.
         {
-            let mut q = world.query::<&Pos, ()>();
+            let q = world.query::<&Pos, ()>();
             let pos_e2 = q.get(e2).expect("E2 should still exist");
             assert_eq!(pos_e2.x, 2.0);
         }
@@ -1477,7 +1477,7 @@ mod world_tests {
         assert_eq!(initial_loc.row, final_loc.row);
 
         // Data check
-        let mut q = world.query::<&Pos, ()>();
+        let q = world.query::<&Pos, ()>();
         assert!(q.get(e).is_some());
     }
 

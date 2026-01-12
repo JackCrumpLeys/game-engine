@@ -14,7 +14,7 @@
 
 use game_engine_derive::Component;
 use game_engine_ecs::prelude::*;
-use game_engine_ecs::query::{Changed, With, Without};
+use game_engine_ecs::query::{Changed, Without};
 use game_engine_ecs::system::command::Command;
 use game_engine_ecs::system::{Local, System, UnsafeWorldCell};
 use std::ops::Deref;
@@ -72,7 +72,7 @@ fn spawner_system(mut commands: Command, mut stats: ResMut<GameStats>) {
 /// Demonstrates: Query iteration, Mutable components
 fn movement_system(mut query: Query<(&mut Position, &Velocity)>) {
     println!("[System: Movement] Updating positions...");
-    for (mut pos, vel) in query.iter() {
+    for (mut pos, vel) in query.iter_mut() {
         pos.x += vel.x;
         pos.y += vel.y;
     }
@@ -80,9 +80,9 @@ fn movement_system(mut query: Query<(&mut Position, &Velocity)>) {
 
 /// System: Prints positions ONLY if they changed.
 /// Demonstrates: Change Detection (Filters)
-fn logger_system(mut query: Query<(Entity, &Position), Changed<Position>>) {
+fn logger_system(query: Query<(Entity, &Position), Changed<Position>>) {
     for (e, pos) in query.iter() {
-        println!("  -> Entity {:?} moved to {:?}", e, pos);
+        println!("  -> Entity {e:?} moved to {pos:?}");
     }
 }
 
@@ -91,16 +91,16 @@ fn logger_system(mut query: Query<(Entity, &Position), Changed<Position>>) {
 fn damage_system(
     mut timer: Local<u32>,
     mut query: Query<(Entity, &mut Health), Without<Player>>, // Don't hurt the player
-    mut all_query: Query<&Position>, // Secondary query for random access lookups
+    all_query: Query<&Position>, // Secondary query for random access lookups
 ) {
     *timer += 1;
-    if *timer % 2 != 0 {
+    if !(*timer).is_multiple_of(2) {
         return;
     } // Only run every other frame
 
     println!("[System: Damage] Applying environmental damage to non-players...");
 
-    for (e, mut health) in query.iter() {
+    for (e, mut health) in query.iter_mut() {
         health.0 -= 5.0;
 
         // Random access demo: Look up position of the entity we are damaging
@@ -118,10 +118,10 @@ fn damage_system(
 
 /// System: Despawns dead entities.
 /// Demonstrates: Commands (Despawn)
-fn cleanup_system(mut commands: Command, mut query: Query<(Entity, &Health)>) {
+fn cleanup_system(mut commands: Command, query: Query<(Entity, &Health)>) {
     for (e, health) in query.iter() {
         if health.0 <= 0.0 {
-            println!("[System: Cleanup] Entity {:?} died. Despawning.", e);
+            println!("[System: Cleanup] Entity {e:?} died. Despawning.");
             commands.despawn(e);
         }
     }
@@ -208,7 +208,7 @@ fn main() {
     // --- MAIN LOOP ---
     // Run for 10 frames to demonstrate lifecycle
     for i in 1..=10 {
-        println!("\n--- FRAME {} ---", i);
+        println!("\n--- FRAME {i} ---");
 
         // Update Frame Count Resource
         {

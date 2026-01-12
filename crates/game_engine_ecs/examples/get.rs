@@ -84,10 +84,10 @@ struct Position {
 /// Unsafe way to do nested mutable queries
 /// an abstraction over unsafe code that allows nested mutabilty would be in a real implementation
 #[allow(mutable_transmutes)] // We would use unsafecell in a real implementation
-fn unsafe_sys_a(mut pos: Query<(Entity, &mut Position)>, mut linked: Query<&LinkedTo>) {
-    let entities: Vec<Entity> = pos.iter().map(|(e, _)| e).collect();
+fn unsafe_sys_a(mut pos: Query<(Entity, &mut Position)>, linked: Query<&LinkedTo>) {
+    let entities: Vec<Entity> = pos.iter_mut().map(|(e, _)| e).collect();
     // Mut<&mut T> implements DerefMut<Target=&mut T> and is used for change tracking.
-    let map: HashMap<Entity, Mut<Position>> = pos.iter().collect();
+    let map: HashMap<Entity, Mut<Position>> = pos.iter_mut().collect();
 
     for entity in entities.into_iter() {
         let e = map.get(&entity).expect("Something went horrably wrong");
@@ -133,7 +133,7 @@ fn sys_movement_logic(
 ) {
     *local += 1;
 
-    query.for_each(|(mut pos, link)| {
+    query.for_each_mut(|(mut pos, link)| {
         // 1. Move Self
         pos.x += *local as f32;
         pos.y += *local as f32;
@@ -161,7 +161,7 @@ fn sys_apply_link_effects(
     for event in events.iter() {
         // query.get() handles the locking logic internally.
         // If the entity is alive and has a Position, we get a guard.
-        if let Some(mut pos) = query.get(event.target) {
+        if let Some(mut pos) = query.get_mut(event.target) {
             pos.x += event.dx;
             pos.y += event.dy;
         }

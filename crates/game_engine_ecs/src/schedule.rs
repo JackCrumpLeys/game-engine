@@ -1,12 +1,11 @@
-use game_engine_utils::graph::{DirectedGraph, NodeIndex};
+use game_engine_utils::graph::DirectedGraph;
 use game_engine_utils::{DynEq, DynHash};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
 
 use crate::prelude::{IntoSystem, System, World};
 use crate::system::{SystemAccess, UnsafeWorldCell};
-use std::any::{Any, TypeId};
-use std::collections::{HashMap, HashSet};
+use std::any::TypeId;
 use std::marker::PhantomData;
 
 // ============================================================================
@@ -288,6 +287,12 @@ pub struct Schedule {
     needs_rebuild: bool,
 }
 
+impl Default for Schedule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Schedule {
     pub fn new() -> Self {
         Self {
@@ -343,7 +348,7 @@ impl Schedule {
     /// Executes one full frame of the schedule.
     pub fn run(&mut self, world: &mut World) {
         // 1. Check if the world's archetypes have changed, which requires updating system access.
-        let mut access_changed = false;
+        let access_changed = false;
         // for sys in &mut self.systems {
         //     if sys.update_access(world) {
         //         access_changed = true;

@@ -52,7 +52,7 @@ struct Poisoned; // Marker component
 
 // System 1: Movement (Pos += Vel)
 fn sys_movement(mut query: game_engine_ecs::system::Query<(&mut Position, &Velocity)>) {
-    query.for_each(|(mut pos, vel)| {
+    query.for_each_mut(|(mut pos, vel)| {
         pos.x += vel.x;
         pos.y += vel.y;
     });
@@ -60,7 +60,7 @@ fn sys_movement(mut query: game_engine_ecs::system::Query<(&mut Position, &Veloc
 
 // System 2: Boundaries (Clamp Position)
 fn sys_boundaries(mut query: game_engine_ecs::system::Query<&mut Position>) {
-    query.for_each(|mut pos| {
+    query.for_each_mut(|mut pos| {
         pos.x = pos.x.clamp(-1000.0, 1000.0);
         pos.y = pos.y.clamp(-1000.0, 1000.0);
     });
@@ -68,14 +68,14 @@ fn sys_boundaries(mut query: game_engine_ecs::system::Query<&mut Position>) {
 
 // System 3: Rotation (Spin)
 fn sys_rotate(mut query: game_engine_ecs::system::Query<&mut Rotation>) {
-    query.for_each(|mut rot| {
+    query.for_each_mut(|mut rot| {
         rot.radians += 0.01;
     });
 }
 
 // System 4: Transform (Heavy-ish Math: Matrix from Pos + Rot)
 fn sys_update_transform(mut query: Query<(&Position, &Rotation, &mut TransformMatrix)>) {
-    query.for_each(
+    query.for_each_mut(
         |(pos, rot, mut mat): (&Position, &Rotation, Mut<'_, TransformMatrix>)| {
             let c = rot.radians.cos();
             let s = rot.radians.sin();
@@ -102,12 +102,12 @@ fn sys_life_logic(
     >,
 ) {
     // 5a. Apply Regen
-    q_regen.for_each(|(mut hp, regen)| {
+    q_regen.for_each_mut(|(mut hp, regen)| {
         hp.val += regen.rate;
     });
 
     // 5b. Apply Poison
-    q_poison.for_each(|mut hp| {
+    q_poison.for_each_mut(|mut hp| {
         hp.val -= 1.0;
     });
 }
