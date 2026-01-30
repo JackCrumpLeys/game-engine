@@ -341,7 +341,7 @@ impl ApplicationHandler for RenderManager {
                 match &mut self.render_ctx {
                     Some(rcx) => {
                         // Handle rendering here
-                        if self.snapshot_pair.is_none() {
+                        if self.snapshot_pair.is_some() {
                             // Finally do pass
                             match rcx.pass_manager.do_pass(
                                 rcx.swapchain.clone(),
