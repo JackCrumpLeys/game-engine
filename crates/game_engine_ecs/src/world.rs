@@ -13,6 +13,7 @@ use crate::system::UnsafeWorldCell;
 use crate::system::command::ThreadLocalCommandQueue;
 use crate::thread_entity_allocator::LocalThreadEntityAllocator;
 use crate::threading::{FromWorldThread, WorldThreadLocalStore};
+use std::any::type_name;
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::{Arc, RwLock};
 
@@ -209,9 +210,6 @@ pub struct ArchetypeStore {
     inner: Vec<Archetype>,
     // The Lookup: Sorted by Mask
     lookup: Vec<(ComponentMask, ArchetypeId)>,
-
-    /// Index: ComponentId, Value: ArchetypeId of archetype with that component added
-    with: [Option<ArchetypeId>; MAX_COMPONENTS],
 }
 
 /// By not using a Vec directly, we can later change the storage strategy
@@ -227,7 +225,6 @@ impl ArchetypeStore {
         ArchetypeStore {
             inner: Vec::new(),
             lookup: Vec::new(),
-            with: [None; MAX_COMPONENTS],
         }
     }
 
@@ -329,7 +326,7 @@ impl ArchetypeStore {
 
     pub fn get_or_create_archetype(
         &mut self,
-        ids: impl IntoIterator<Item = ComponentId>,
+        ids: &[ComponentId],
         registry: &ComponentRegistry,
     ) -> ArchetypeId {
         let mut curr = self.get_or_create_empty(registry);
@@ -449,10 +446,9 @@ impl World {
         let metas = B::component_metas();
         self.registry.bulk_manual_register(&real_order, &metas);
 
-        let mask = B::mask();
         let arch_id = self
             .archetypes
-            .get_or_create_archetype(mask, &self.registry);
+            .get_or_create_archetype(&B::component_ids(), &self.registry);
         let arch = &mut self.archetypes[arch_id];
         let row = arch.push_entity(entity);
 
@@ -463,7 +459,7 @@ impl World {
         // Collect mutable references to columns into SmallVec
         let mut arch_cols: SmallVec<&mut TypeErasedSequence, 16> = arch_cols_storage
             .iter_mut()
-            .filter_map(|c| c.as_deref_mut())
+            .filter_map(|c| c.as_mut())
             .map(|col| {
                 col.set_tick(self.current_tick);
                 col.push_ticks(1);
@@ -503,7 +499,7 @@ impl World {
 
         let arch_id = self
             .archetypes
-            .get_or_create_archetype(mask, &self.registry);
+            .get_or_create_archetype(&B::component_ids(), &self.registry);
         let count = bundles.len();
 
         let entities = self.entity_allocator().alloc_batch(count);
@@ -605,7 +601,7 @@ impl World {
             let mask = buffer.masks[i];
             let arch_id = self
                 .archetypes
-                .get_or_create_archetype(mask, &self.registry);
+                .get_or_create_archetype(comp_ids, &self.registry);
             let entities = &buffer.ids[i];
 
             let arch = &mut self.archetypes[arch_id];
