@@ -209,6 +209,9 @@ pub struct ArchetypeStore {
     inner: Vec<Archetype>,
     // The Lookup: Sorted by Mask
     lookup: Vec<(ComponentMask, ArchetypeId)>,
+
+    /// Index: ComponentId, Value: ArchetypeId of archetype with that component added
+    with: [Option<ArchetypeId>; MAX_COMPONENTS],
 }
 
 /// By not using a Vec directly, we can later change the storage strategy
@@ -224,6 +227,7 @@ impl ArchetypeStore {
         ArchetypeStore {
             inner: Vec::new(),
             lookup: Vec::new(),
+            with: [None; MAX_COMPONENTS],
         }
     }
 
@@ -253,7 +257,7 @@ impl ArchetypeStore {
             None => {
                 let mut new_mask = self.inner[from.0].component_mask;
                 new_mask.set_id(with);
-                let id = self.get_or_create_archetype(new_mask, registry);
+                let id = self.get_or_create_archetype_search(new_mask, registry);
                 self.inner[from.0].set_with(with, id);
                 self.inner[id.0].set_without(with, from);
                 id
@@ -273,13 +277,14 @@ impl ArchetypeStore {
             None => {
                 let mut new_mask = self.inner[from.0].component_mask;
                 new_mask.unset_id(without);
-                let id = self.get_or_create_archetype(new_mask, registry);
+                let id = self.get_or_create_archetype_search(new_mask, registry);
                 self.inner[from.0].set_without(without, id);
                 self.inner[id.0].set_with(without, from);
                 id
             }
         }
     }
+
     #[inline(always)]
     pub fn get_disjoint_archetypes(
         &mut self,
@@ -299,24 +304,57 @@ impl ArchetypeStore {
         (first, second)
     }
 
+    pub fn get_or_create_archetype_search(
+        &mut self,
+        mask: ComponentMask,
+        registry: &ComponentRegistry,
+    ) -> ArchetypeId {
+        match self.get_id_search(&mask) {
+            Some(arch) => arch,
+            None => self.create_archetype(mask, registry),
+        }
+    }
+
     #[inline(always)]
-    fn get_or_create_archetype(
+    pub(crate) fn create_archetype(
         &mut self,
         component_mask: ComponentMask,
         registry: &ComponentRegistry,
     ) -> ArchetypeId {
-        if let Some(id) = self.get_id(&component_mask) {
-            return id;
-        }
-
         let id = ArchetypeId(self.len());
         let archetype = Archetype::new(id, component_mask, registry);
         self.push(archetype);
         id
     }
 
+    pub fn get_or_create_archetype(
+        &mut self,
+        ids: impl IntoIterator<Item = ComponentId>,
+        registry: &ComponentRegistry,
+    ) -> ArchetypeId {
+        let mut curr = self.get_or_create_empty(registry);
+
+        for id in ids.into_iter() {
+            curr = self.with(curr, &id, registry);
+        }
+
+        curr
+    }
+
+    fn get_or_create_empty(&mut self, registry: &ComponentRegistry) -> ArchetypeId {
+        if self
+            .lookup
+            .first()
+            .is_none_or(|(mask, _)| mask != &ComponentMask::new())
+        {
+            self.create_archetype(ComponentMask::new(), registry)
+        } else {
+            self.lookup[0].1
+        }
+    }
+
     #[inline(always)]
-    pub fn get_id(&self, mask: &ComponentMask) -> Option<ArchetypeId> {
+    pub fn get_id_search(&self, mask: &ComponentMask) -> Option<ArchetypeId> {
         // Binary search is extremely fast on small-medium datasets
         self.lookup
             .binary_search_by_key(mask, |(m, _)| *m)
@@ -624,14 +662,18 @@ impl World {
             Some(loc) => loc,
             None => {
                 warn!(
-                    "Attempted to insert component into non-existent or uninitialized entity {entity:?}"
+                    "Attempted to insert component into non-existent or uninitialized entity {entity:?}. {}",
+                    type_name::<T>()
                 );
                 return;
             }
         };
 
         if !self.entities().is_initialized(entity) {
-            warn!("Attempted to insert component into uninitialized entity {entity:?}");
+            warn!(
+                "Attempted to insert component into uninitialized entity {entity:?}. {}",
+                type_name::<T>()
+            );
             return;
         }
 
@@ -642,7 +684,7 @@ impl World {
         );
 
         // If the archetype ID didn't change, the entity
-        // didn't have the component. We must return here, otherwise
+        // alread had the component. We must return here, otherwise
         // get_disjoint_archetypes will panic (indices must be different).
         if new_id == loc.archetype_id {
             return;

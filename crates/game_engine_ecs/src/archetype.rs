@@ -1,6 +1,7 @@
 use crate::component::{ComponentId, ComponentMask, ComponentRegistry, MAX_COMPONENTS};
 use crate::entity::Entity;
 use crate::storage::Column;
+use std::array;
 use std::ops::Deref;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -27,7 +28,7 @@ pub struct Archetype {
     pub component_ids: Vec<ComponentId>,
     pub component_mask: ComponentMask,
     entities: Vec<Entity>,
-    pub columns: Vec<Option<Box<Column>>>,
+    pub columns: [Option<Column>; MAX_COMPONENTS],
     /// Index: ComponentId, Value: ArchetypeId of archetype with that component added
     with: [Option<ArchetypeId>; MAX_COMPONENTS],
     /// Index: ComponentId, Value: ArchetypeId of archetype with that component removed
@@ -43,30 +44,18 @@ impl Archetype {
         Archetype {
             id,
             columns: {
-                // for &comp_id in &component_mask.to_ids() {
-                //     // TODO: Faster method for batch insert?
-                //     if let Some(meta) = registry.get_meta(comp_id) {
-                //         cols.insert(comp_id, Column::new(meta.layout));
-                //     } else {
-                //         panic!("ComponentId {comp_id:?} not found in registry");
-                //     }
-                // }
-                let mut cols = Vec::with_capacity(ComponentMask::CAPACITY);
-
-                for comp_id in 0..ComponentMask::CAPACITY {
-                    let cid = ComponentId(comp_id);
+                array::from_fn(|id| {
+                    let cid = ComponentId(id);
                     if component_mask.has_id(&cid) {
                         if let Some(meta) = registry.get_meta(cid) {
-                            cols.push(Some(Box::new(Column::from_meta(meta))));
+                            Some(Column::from_meta(meta))
                         } else {
                             panic!("ComponentId {cid:?} not found in registry");
                         }
                     } else {
-                        cols.push(None);
+                        None
                     }
-                }
-
-                cols
+                })
             },
             component_ids: { component_mask.to_ids() },
             component_mask,
@@ -77,7 +66,7 @@ impl Archetype {
     }
 
     pub(crate) fn with(&self, comp_id: &ComponentId) -> Option<ArchetypeId> {
-        self.with[comp_id.0]
+        self.with[comp_id.0].or_else(|| self.component_mask.has_id(comp_id).then_some(self.id))
     }
 
     pub(crate) fn set_with(&mut self, comp_id: &ComponentId, arch_id: ArchetypeId) {
@@ -188,17 +177,17 @@ impl Archetype {
     }
 
     pub fn columns_mut(&mut self) -> impl Iterator<Item = &mut Column> {
-        self.columns.iter_mut().filter_map(|c| c.as_deref_mut())
+        self.columns.iter_mut().filter_map(|c| c.as_mut())
     }
 
     /// Helper to access a specific column safely and mutably
     pub fn column_mut(&mut self, id: &ComponentId) -> Option<&mut Column> {
-        self.columns.get_mut(id.0).and_then(|c| c.as_deref_mut())
+        self.columns.get_mut(id.0).and_then(|c| c.as_mut())
     }
 
     /// Helper to access a specific column safely
     pub fn column(&self, id: &ComponentId) -> Option<&Column> {
-        self.columns.get(id.0).and_then(|c| c.as_deref())
+        self.columns.get(id.0).and_then(|c| c.as_ref())
     }
 
     /// Helper to Borrow a specific column
@@ -206,7 +195,7 @@ impl Archetype {
     pub fn borrow_column(&self, id: &ComponentId) -> bool {
         self.columns
             .get(id.0)
-            .is_some_and(|c| c.as_deref().is_some_and(|c| c.borrow_state().borrow()))
+            .is_some_and(|c| c.as_ref().is_some_and(|c| c.borrow_state().borrow()))
     }
 
     /// Helper to borrow a specific column mutably
@@ -214,7 +203,7 @@ impl Archetype {
     pub fn borrow_column_mut(&self, id: &ComponentId) -> bool {
         self.columns
             .get(id.0)
-            .is_some_and(|c| c.as_deref().is_some_and(|c| c.borrow_state().borrow_mut()))
+            .is_some_and(|c| c.as_ref().is_some_and(|c| c.borrow_state().borrow_mut()))
     }
 
     /// Releases a previously borrowed column
@@ -248,7 +237,7 @@ mod tests {
         let arch_id = ArchetypeId(0);
         let mut arch = Archetype::new(
             arch_id,
-            ComponentMask::from_ids(&[pos_id, vel_id]),
+            ComponentMask::from_ids([pos_id, vel_id]),
             &registry,
         );
 

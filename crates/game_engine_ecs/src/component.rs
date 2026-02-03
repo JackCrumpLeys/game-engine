@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub const MAX_COMPONENTS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
 pub struct ComponentId(pub usize);
 
 #[derive(Debug, Clone, Copy)]
@@ -17,7 +18,6 @@ pub struct ComponentMeta {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct ComponentMask {
-    // Adjusted for 1024 components (16 u64s)
     bits: [u64; MAX_COMPONENTS.div_ceil(64)],
 }
 
@@ -26,14 +26,14 @@ impl ComponentMask {
     pub const CAPACITY: usize = MAX_COMPONENTS;
 
     #[inline(always)]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             bits: [0; Self::WORD_COUNT],
         }
     }
 
     #[inline]
-    pub fn set_id(&mut self, id: &ComponentId) {
+    pub const fn set_id(&mut self, id: &ComponentId) {
         self.unsafe_set(id.0);
     }
 
@@ -55,14 +55,15 @@ impl ComponentMask {
     }
 
     #[inline]
-    pub fn from_ids(ids: &[ComponentId]) -> Self {
+    pub fn from_ids(ids: impl IntoIterator<Item = ComponentId>) -> Self {
         let mut mask = Self::new();
-        for id in ids {
+        for id in ids.into_iter() {
             mask.unsafe_set(id.0);
         }
         mask
     }
 
+    #[inline]
     pub fn to_ids(&self) -> Vec<ComponentId> {
         let mut ids = Vec::with_capacity(8); // Small optimization
         for index in 0..Self::CAPACITY {
@@ -232,8 +233,8 @@ impl_component!(
 );
 
 pub struct ComponentRegistry {
-    // Sparse storage. Index = Global ComponentId.
-    components: Vec<Option<ComponentMeta>>,
+    // Index = Global ComponentId.
+    components: [Option<ComponentMeta>; MAX_COMPONENTS],
 }
 
 impl Default for ComponentRegistry {
@@ -243,9 +244,9 @@ impl Default for ComponentRegistry {
 }
 
 impl ComponentRegistry {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         ComponentRegistry {
-            components: Vec::with_capacity(MAX_COMPONENTS),
+            components: [None; MAX_COMPONENTS],
         }
     }
 
@@ -256,11 +257,6 @@ impl ComponentRegistry {
             panic!("Exceeded maximum number of components: {MAX_COMPONENTS}");
         }
 
-        // Ensure vector is large enough for this ID
-        if id.0 >= self.components.len() {
-            self.components.resize(id.0 + 1, None);
-        }
-
         // Register metadata if this is the first time THIS WORLD sees this component
         if self.components[id.0].is_none() {
             self.components[id.0] = Some(T::meta());
@@ -269,20 +265,19 @@ impl ComponentRegistry {
         id
     }
 
-    pub fn bulk_manual_register(&mut self, ids: &[ComponentId], metas: &[ComponentMeta]) {
-        for (meta, id) in metas.iter().zip(ids.iter()) {
+    pub fn bulk_manual_register(
+        &mut self,
+        ids: impl IntoIterator<Item = ComponentId>,
+        metas: impl IntoIterator<Item = ComponentMeta>,
+    ) {
+        for (meta, id) in metas.into_iter().zip(ids.into_iter()) {
             if id.0 >= MAX_COMPONENTS {
                 panic!("Exceeded maximum number of components: {MAX_COMPONENTS}");
             }
 
-            // Ensure vector is large enough for this ID
-            if id.0 >= self.components.len() {
-                self.components.resize(id.0 + 1, None);
-            }
-
             // Register metadata
             if self.components[id.0].is_none() {
-                self.components[id.0] = Some(*meta);
+                self.components[id.0] = Some(meta);
             }
         }
     }

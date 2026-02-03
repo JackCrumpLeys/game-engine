@@ -116,7 +116,7 @@ impl TypeErasedSequence {
         self.len += 1;
     }
 
-    // SAFETY: Caller ensures capacity > len and T matches layout
+    /// SAFETY: Caller ensures capacity > len and T matches layout
     #[inline(always)]
     pub unsafe fn push_unchecked<T>(&mut self, value: T) {
         #[cfg(debug_assertions)]

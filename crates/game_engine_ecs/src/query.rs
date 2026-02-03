@@ -30,7 +30,7 @@ pub trait Fetch<'a> {
     /// Skips the given number of items.
     /// Current index is advanced by count.
     /// # Safety
-    /// Caller must ensure current index + count <= length.
+    /// Caller must ensure current index + count < length.
     unsafe fn skip(&mut self, count: usize) {
         for _ in 0..count {
             let _ = unsafe { self.next() };
@@ -54,6 +54,23 @@ pub trait View<'a>: Sized {
         registry: &ComponentRegistry,
         tick: u32,
     ) -> Option<Self::Fetch>;
+}
+
+/// Trait for the static metadata required to manage a query (IDs, Locks).
+/// This MUST be 'static.
+pub trait QueryData: 'static + Send + Sync {
+    fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>);
+    fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker);
+}
+
+/// A marker trait for types that describe a query.
+/// Implemented for &'static T, &'static mut T, and tuples.
+/// Bridge between the lifetime-bound View and the static QueryData.
+pub trait QueryToken {
+    /// The actual View type constructed during iteration with lifetime 'a.
+    type View<'a>: View<'a>;
+    /// The static metadata type.
+    type Persistent: QueryData;
 }
 
 // --- Read Implementation ---
@@ -90,16 +107,6 @@ impl<'a, T: 'static> Fetch<'a> for ReadFetch<T> {
 // Public Interface (QueryToken)
 //    This is the bridge between Static Types (Query<(&A, &B)>) and Dynamic Views.
 // ============================================================================
-
-/// A marker trait for types that describe a query.
-/// Implemented for &'static T, &'static mut T, and tuples.
-/// Bridge between the lifetime-bound View and the static QueryData.
-pub trait QueryToken {
-    /// The actual View type constructed during iteration with lifetime 'a.
-    type View<'a>: View<'a>;
-    /// The static metadata type.
-    type Persistent: QueryData;
-}
 
 /// Marker trait for QueryTokens that do not require exclusive access.
 /// This allows the query to be iterated via `&self`.
@@ -333,13 +340,6 @@ impl<'a, T> std::ops::DerefMut for Mut<'a, T> {
     }
 }
 
-/// Trait for the static metadata required to manage a query (IDs, Locks).
-/// This MUST be 'static.
-pub trait QueryData: 'static + Send + Sync {
-    fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>);
-    fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker);
-}
-
 impl QueryToken for Entity {
     type View<'a> = Entity;
     type Persistent = EntityData;
@@ -459,9 +459,9 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
                 last_updated_arch_idx: ArchetypeId(0),
                 borrow_checker,
             }),
-            view_required: ComponentMask::from_ids(&view_required),
-            filter_required: ComponentMask::from_ids(&filter_required),
-            filter_excluded: ComponentMask::from_ids(&filter_excluded),
+            view_required: ComponentMask::from_ids(view_required),
+            filter_required: ComponentMask::from_ids(filter_required),
+            filter_excluded: ComponentMask::from_ids(filter_excluded),
             _marker: PhantomData,
         }
     }
@@ -585,7 +585,6 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             panic!("Query borrow conflict detected");
         }
 
-        // Capture tick before update for filter logic
         for &arch_id in &state.cached_archetypes {
             // SAFETY: We iterate distinct archetypes sequentially.
             let arch = unsafe { &mut world.world_mut().archetypes[arch_id] } as *mut Archetype;
