@@ -225,7 +225,6 @@ impl ThreadLocalCommandQueue {
             /// # Safety
             /// `ptr` must point to `Self::ImmediateData`.
             unsafe fn execute_shim_impl<C: CommandExecutable>(ptr: *mut u8, world: &mut World) {
-                // We assume ptr was created via Box::into_raw
                 let in_d = unsafe { ptr::read_unaligned(ptr as *mut C::Storage) };
 
                 C::execute(in_d, world);
@@ -260,17 +259,19 @@ impl ThreadLocalCommandQueue {
 
     /// Execute all commands and clear the buffer
     pub fn apply(&mut self, world: &mut World) {
-        // Iterate over commands
-        for cmd in &self.ptrs {
+        // "Steal" the pointers.
+        let ptrs = std::mem::take(&mut self.ptrs);
+
+        // Iterate the local vector.
+        for cmd in &ptrs {
             unsafe {
-                // Reconstruct the pointer into the buffer
                 let ptr = self.store.as_mut_ptr().add(cmd.data_offset);
+
                 // Call the shim
                 (cmd.execute_shim)(ptr, world);
             }
         }
 
-        self.ptrs.clear();
         self.store.clear();
     }
 }
@@ -361,7 +362,6 @@ mod test_commands {
 
     use super::*;
     use crate::prelude::*;
-    use crate::query::QueryState;
     use crate::world::World;
 
     // --- Mock Data ---
@@ -399,7 +399,7 @@ mod test_commands {
             // Crucial Check: The Entity ID is correct
             commands.execute(move |world| {
                 assert!(world.entities().is_alive(e));
-                let query = QueryState::<&Position>::new(world);
+                let query = world.query::<&Position, ()>();
                 assert_eq!(
                     *query.get(e).unwrap().deref(),
                     &Position { x: 10.0, y: 20.0 }
@@ -413,7 +413,7 @@ mod test_commands {
         // The entity ID is allocated in the thread-local allocator,
         // but it is not yet "alive" in the main world index or archetype storage.
         {
-            let query = crate::query::QueryState::<&Position>::new(&mut world);
+            let query = world.query::<&Position, ()>();
             assert_eq!(query.iter().count(), 0);
         }
 
@@ -423,7 +423,7 @@ mod test_commands {
         // Post-Flush:
         // The insert buffer should have been drained and the entity created.
         {
-            let query = crate::query::QueryState::<&Position>::new(&mut world);
+            let query = world.query::<&Position, ()>();
             let pos = query.iter().next().expect("Entity should exist now");
             assert_eq!(pos.x, 10.0);
         }

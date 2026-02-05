@@ -290,8 +290,8 @@ fn filtering_logic(c: &mut Criterion) {
     group.finish();
 }
 
-#[inline(never)]
-fn query_iteration(query: &mut QueryState<(&'static mut Position, &'static TransformMatrix)>) {
+#[inline(always)]
+fn query_iteration(query: &mut QueryState<(&mut Position, &TransformMatrix)>) {
     query.for_each_mut(|(mut pos, mat)| {
         // heavy math: Matrix multiplication simulation
         pos.x = pos.x * mat.m[0] + pos.y * mat.m[4] + pos.z * mat.m[8] + mat.m[12];

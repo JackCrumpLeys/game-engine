@@ -3,7 +3,7 @@ use crate::borrow::{AtomicBorrow, ColumnBorrowChecker};
 use crate::component::{Component, ComponentId, ComponentMask, ComponentRegistry};
 use crate::entity::Entity;
 use crate::system::UnsafeWorldCell;
-use crate::world::World;
+use crate::world::{ChangeTick, World};
 
 use std::cell::{RefCell, RefMut};
 use std::marker::PhantomData;
@@ -52,7 +52,7 @@ pub trait View<'a>: Sized {
     unsafe fn create_fetch(
         archetype: *mut Archetype,
         registry: &ComponentRegistry,
-        tick: u32,
+        tick: ChangeTick,
     ) -> Option<Self::Fetch>;
 }
 
@@ -191,7 +191,7 @@ impl<'a, V: View<'a>> View<'a> for Option<V> {
     unsafe fn create_fetch(
         archetype: *mut Archetype,
         registry: &ComponentRegistry,
-        tick: u32,
+        tick: ChangeTick,
     ) -> Option<Self::Fetch> {
         Some(OptionalFetch(unsafe {
             V::create_fetch(archetype, registry, tick)
@@ -216,8 +216,8 @@ impl<'a, V: Fetch<'a>> Fetch<'a> for OptionalFetch<V> {
 // --- Write Implementation ---
 pub struct WriteFetch<'a, T> {
     ptr: NonNull<T>,
-    ticks: NonNull<u32>,
-    current_tick: u32,
+    ticks: NonNull<ChangeTick>,
+    current_tick: ChangeTick,
     _marker: PhantomData<&'a mut T>,
 }
 
@@ -274,7 +274,7 @@ impl<'a, T: Component> View<'a> for Mut<'a, T> {
     unsafe fn create_fetch(
         archetype: *mut Archetype,
         registry: &ComponentRegistry,
-        tick: u32,
+        tick: ChangeTick,
     ) -> Option<Self::Fetch> {
         let id = registry.get_id::<T>()?;
         let column = unsafe { &mut *archetype }.column_mut(&id)?;
@@ -302,7 +302,7 @@ impl<'a, T: Component> View<'a> for &'a T {
     unsafe fn create_fetch(
         archetype: *mut Archetype,
         registry: &ComponentRegistry,
-        _tick: u32,
+        _tick: ChangeTick,
     ) -> Option<Self::Fetch> {
         let id = registry.get_id::<T>()?;
         let column = unsafe { &mut *archetype }.column_mut(&id)?;
@@ -318,8 +318,8 @@ impl<'a, T: Component> View<'a> for &'a T {
 // The wrapper yielded by the iterator
 pub struct Mut<'a, T> {
     value: &'a mut T,
-    tick_ptr: *mut u32,
-    current_tick: u32,
+    tick_ptr: *mut ChangeTick,
+    current_tick: ChangeTick,
 }
 
 impl<'a, T> std::ops::Deref for Mut<'a, T> {
@@ -333,7 +333,7 @@ impl<'a, T> std::ops::DerefMut for Mut<'a, T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut T {
         // ONLY update the tick when DerefMut is actually called
-        // SAFETY: tick_ptr is valid and points to a u32.
+        // SAFETY: tick_ptr is valid and points to a ChangeTick.
         // This is guaranteed by the WriteFetch struct.
         unsafe { *self.tick_ptr = self.current_tick };
         self.value
@@ -358,7 +358,7 @@ impl<'a> View<'a> for Entity {
     unsafe fn create_fetch(
         archetype: *mut Archetype,
         _registry: &ComponentRegistry,
-        _tick: u32,
+        _tick: ChangeTick,
     ) -> Option<Self::Fetch> {
         Some(EntityFetch {
             entities: unsafe { &*archetype }.entities(),
@@ -397,7 +397,7 @@ impl<'a> Fetch<'a> for EntityFetch<'a> {
 // ============================================================================
 
 #[derive(Debug)]
-struct QueryStateInternal {
+pub(crate) struct QueryStateInternal {
     cached_archetypes: Vec<ArchetypeId>,
     last_updated_arch_idx: ArchetypeId,
     borrow_checker: ColumnBorrowChecker,
@@ -467,6 +467,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     }
 
     /// Scans new archetypes in the World since the last update and adds matches to the cache.
+    #[inline(always)]
     fn update_archetype_cache(&self, world: &World, state: &mut QueryStateInternal) {
         if state.last_updated_arch_idx.0 == world.archetypes.len() {
             return;
@@ -539,7 +540,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     pub fn iter<'a, V: View<'a>, F: Filter<Persistent = FD>>(
         &'a self,
         world: &'a UnsafeWorldCell<'a>,
-        tick: u32,
+        tick: ChangeTick,
     ) -> QueryIter<'a, V, F> {
         let mut state_guard = self.state.borrow_mut();
 
@@ -574,7 +575,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         &'a self,
         world: &'a UnsafeWorldCell<'a>,
         mut func: Func,
-        tick: u32,
+        tick: ChangeTick,
     ) where
         Func: FnMut(V::Item),
     {
@@ -637,7 +638,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         &'a self,
         world: &'a UnsafeWorldCell<'a>,
         entity: Entity,
-        tick: u32,
+        tick: ChangeTick,
     ) -> Option<GetGuard<'a, V::Item>> {
         // We only need the state lock to update cache/check masks and get raw borrows.
         // We DO NOT hold the lock while returning the GetGuard.
@@ -760,7 +761,7 @@ pub struct QueryIter<'a, V: View<'a>, F: Filter> {
     /// Index of the archetype we are currently iterating.
     current_arch_idx: usize,
     /// The tick used for filter change detection.
-    last_query_tick: u32,
+    last_query_tick: ChangeTick,
     /// Reference to the checker in `QueryInner` to release borrows on drop.
     borrow_checker: *mut ColumnBorrowChecker,
 
@@ -837,6 +838,102 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
             };
         }
     }
+
+    fn count(self) -> usize {
+        let mut count = 0;
+
+        let total_archs = unsafe { (&(*self.archetype_ids)).len() };
+
+        for i in (self.current_arch_idx)..total_archs {
+            let arch_id = unsafe { (*self.archetype_ids)[i] };
+            let arch = unsafe { &mut self.world.world_mut().archetypes[arch_id] as *mut Archetype };
+            let len = unsafe { &*arch }.len();
+
+            if len == 0 {
+                continue;
+            }
+
+            let skip_filter = unsafe {
+                F::create_skip_filter(arch, &self.world.world().registry, self.last_query_tick)
+            };
+
+            if let Some(mut skip_filter) = skip_filter {
+                for _ in 0..len {
+                    if !skip_filter.should_skip() {
+                        count += 1;
+                    }
+                }
+            } else {
+                count += len;
+            }
+        }
+
+        count - self.current_row
+    }
+
+    fn fold<B, G>(mut self, init: B, mut func: G) -> B
+    where
+        G: FnMut(B, Self::Item) -> B,
+    {
+        let mut accumulator = init;
+
+        loop {
+            // 1. Process current archetype tight loop
+            if let Some(fetch) = &mut self.current_fetch
+                && self.current_row < self.current_len
+            {
+                // Unpack filter to avoid re-checking Some() inside the tight loop
+                if let Some(skip_filter) = &mut self.current_skip_filter {
+                    while self.current_row < self.current_len {
+                        if skip_filter.should_skip() {
+                            unsafe { fetch.skip(1) };
+                        } else {
+                            let item = unsafe { fetch.next() };
+                            accumulator = func(accumulator, item);
+                        }
+                        self.current_row += 1;
+                    }
+                } else {
+                    // Optimized loop: No filter, just churn data
+                    while self.current_row < self.current_len {
+                        let item = unsafe { fetch.next() };
+                        accumulator = func(accumulator, item);
+                        self.current_row += 1;
+                    }
+                }
+            }
+
+            // 2. Move to next archetype
+            if self.current_arch_idx >= unsafe { (&(*self.archetype_ids)).len() } {
+                break;
+            }
+
+            let arch_id = unsafe { (*self.archetype_ids)[self.current_arch_idx] };
+            self.current_arch_idx += 1;
+
+            let arch = unsafe { &mut self.world.world_mut().archetypes[arch_id] as *mut Archetype };
+
+            if unsafe { &*arch }.len() == 0 {
+                continue;
+            }
+
+            // Setup state (Identical to next())
+            self.current_len = unsafe { &*arch }.len();
+            self.current_row = 0;
+            self.current_fetch = unsafe {
+                V::create_fetch(
+                    arch,
+                    &self.world.world().registry,
+                    self.world.world().tick(),
+                )
+            };
+            self.current_skip_filter = unsafe {
+                F::create_skip_filter(arch, &self.world.world().registry, self.last_query_tick)
+            };
+        }
+
+        accumulator
+    }
 }
 
 impl<'a, V: View<'a>, F: Filter> Drop for QueryIter<'a, V, F> {
@@ -879,7 +976,7 @@ pub trait Filter {
     unsafe fn create_skip_filter<'a>(
         _archetype: *mut Archetype,
         _registry: &ComponentRegistry,
-        _tick: u32,
+        _tick: ChangeTick,
     ) -> Option<Self::SkipFilter<'a>> {
         None
     }
@@ -963,7 +1060,7 @@ impl<T: Filter, U: Filter> Filter for And<T, U> {
     unsafe fn create_skip_filter<'a>(
         archetype: *mut Archetype,
         registry: &ComponentRegistry,
-        tick: u32,
+        tick: ChangeTick,
     ) -> Option<Self::SkipFilter<'a>> {
         unsafe {
             // safety: The filters SHOULD check that they obey borrow rules. using
@@ -1019,8 +1116,8 @@ impl<T: Component> FilterData for ChangedData<T> {
 }
 
 pub struct ChangedSkipFilter<T: Component> {
-    change_tick: u32,
-    changed_ptr: *const u32,
+    change_tick: ChangeTick,
+    changed_ptr: *const ChangeTick,
     _marker: PhantomData<T>,
 }
 impl<T: Component> SkipFilter for ChangedSkipFilter<T> {
@@ -1040,7 +1137,7 @@ impl<T: Component> Filter for Changed<T> {
     unsafe fn create_skip_filter<'a>(
         archetype: *mut Archetype,
         registry: &ComponentRegistry,
-        tick: u32,
+        tick: ChangeTick,
     ) -> Option<Self::SkipFilter<'a>> {
         let id = registry.get_id::<T>()?;
         let column = unsafe { &mut *archetype }.column_mut(&id)?;
@@ -1079,7 +1176,7 @@ macro_rules! impl_query_tuples {
         impl<'a, $($name: View<'a>),*> View<'a> for ($($name,)*) {
             type Item = ($($name::Item,)*);
             type Fetch = ($($name::Fetch,)*);
-            unsafe fn create_fetch(arch: *mut Archetype, reg: &ComponentRegistry, tick: u32) -> Option<Self::Fetch> {
+            unsafe fn create_fetch(arch: *mut Archetype, reg: &ComponentRegistry, tick: ChangeTick) -> Option<Self::Fetch> {
                 unsafe { Some(( $( $name::create_fetch(arch, reg, tick)?, )* )) }
             }
         }
@@ -1115,7 +1212,7 @@ macro_rules! impl_query_tuples {
             type Persistent = ($($name::Persistent,)*);
             type SkipFilter<'a> = ($(Option<$name::SkipFilter<'a>>,)*);
 
-            unsafe fn create_skip_filter<'a>(arch: *mut Archetype, reg: &ComponentRegistry, tick: u32) -> Option<Self::SkipFilter<'a>> { unsafe {
+            unsafe fn create_skip_filter<'a>(arch: *mut Archetype, reg: &ComponentRegistry, tick: ChangeTick) -> Option<Self::SkipFilter<'a>> { unsafe {
                 #[allow(clippy::question_mark)] // idk seems wrong considering everyone has to be none for this but clippys method means only one has to be none
                 if $( $name::create_skip_filter(arch, reg, tick).is_none() )&& * {
                     return None;
@@ -1144,10 +1241,6 @@ macro_rules! impl_query_tuples {
 
 auto_impl_all_tuples!(impl_query_tuples);
 
-// ------------------------------------------------------------------------
-// Helper: QueryState Wrapper
-// This allows us to write `query.iter()` without explicit types
-// ------------------------------------------------------------------------
 pub struct QueryState<'w, Q: QueryToken, F: Filter = ()> {
     inner: QueryInner<Q::Persistent, F::Persistent>,
     pub world: UnsafeWorldCell<'w>,
@@ -1156,22 +1249,28 @@ pub struct QueryState<'w, Q: QueryToken, F: Filter = ()> {
 
 impl<'w, Q: QueryToken, F: Filter> QueryState<'w, Q, F> {
     pub fn new(world: &'w mut World) -> Self {
+        let inner = QueryInner::new::<Q, F>(&mut world.registry);
+        {
+            let mut state = inner.state.borrow_mut();
+            inner.update_archetype_cache(world, &mut state);
+        }
         Self {
-            inner: QueryInner::new::<Q, F>(&mut world.registry),
+            inner,
             world: UnsafeWorldCell::new(world),
             _marker: std::marker::PhantomData,
         }
     }
 
     pub fn iter_mut(&mut self) -> QueryIter<'_, Q::View<'_>, F> {
-        self.inner.iter::<Q::View<'_>, F>(&self.world, 0)
+        self.inner.iter::<Q::View<'_>, F>(&self.world, 0.into())
     }
 
     pub fn get_mut(
         &mut self,
         entity: Entity,
     ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
-        self.inner.get::<Q::View<'_>, F>(&self.world, entity, 0)
+        self.inner
+            .get::<Q::View<'_>, F>(&self.world, entity, 0.into())
     }
 
     pub fn for_each_mut<'a, Func>(&'a mut self, func: Func)
@@ -1179,7 +1278,7 @@ impl<'w, Q: QueryToken, F: Filter> QueryState<'w, Q, F> {
         Func: FnMut(<Q::View<'a> as View<'a>>::Item),
     {
         self.inner
-            .for_each::<Q::View<'a>, F, Func>(&self.world, func, 0)
+            .for_each::<Q::View<'a>, F, Func>(&self.world, func, 0.into())
     }
 }
 
@@ -1188,17 +1287,18 @@ where
     Q: ReadOnly,
 {
     pub fn iter(&self) -> QueryIter<'_, Q::View<'_>, F> {
-        self.inner.iter::<Q::View<'_>, F>(&self.world, 0)
+        self.inner.iter::<Q::View<'_>, F>(&self.world, 0.into())
     }
     pub fn get(&self, entity: Entity) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
-        self.inner.get::<Q::View<'_>, F>(&self.world, entity, 0)
+        self.inner
+            .get::<Q::View<'_>, F>(&self.world, entity, 0.into())
     }
     pub fn for_each<'a, Func>(&'a self, func: Func)
     where
         Func: FnMut(<Q::View<'a> as View<'a>>::Item),
     {
         self.inner
-            .for_each::<Q::View<'a>, F, Func>(&self.world, func, 0)
+            .for_each::<Q::View<'a>, F, Func>(&self.world, func, 0.into())
     }
 }
 

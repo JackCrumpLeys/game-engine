@@ -52,7 +52,6 @@ impl LocalThreadEntityAllocator {
     /// Optimized to fetch the exact required amount from global state if the local
     /// cache is insufficient, bypassing the exponential growth logic used for single allocations.
     pub fn alloc_batch(&mut self, count: usize) -> Vec<Entity> {
-        // 1. If we have enough in the buffer, just take them from the end (LIFO-ish for cache, but FIFO for IDs)
         if self.next_entities.len() >= count {
             let start_index = self.next_entities.len() - count;
             return self.next_entities.drain(start_index..).collect();
@@ -60,10 +59,8 @@ impl LocalThreadEntityAllocator {
 
         let mut result = Vec::with_capacity(count);
 
-        // 2. Drain whatever we currently have in the cache
         result.append(&mut self.next_entities);
 
-        // 3. Allocate the EXACT difference from the global allocator
         let needed = count - result.len();
         if needed > 0 {
             let mut global = self.global_allocator.write().unwrap();

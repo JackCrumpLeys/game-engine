@@ -121,7 +121,10 @@ impl ColumnBorrowChecker {
             panic!("conflicting borrows detected");
         }
 
-        self.borrows.union(&other.borrows) || self.mut_borrows.union(&other.mut_borrows)
+        let changed_ref = self.borrows.union(&other.borrows);
+        let changed_mut = self.mut_borrows.union(&other.mut_borrows);
+
+        changed_ref || changed_mut
     }
 
     /// Create a new ColumnBorrowChecker by retaining only components from a specific archetype.

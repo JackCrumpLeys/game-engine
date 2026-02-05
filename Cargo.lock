@@ -1266,6 +1266,8 @@ dependencies = [
  "game_engine_derive",
  "game_engine_utils",
  "log",
+ "paste",
+ "rayon",
  "smallvec 2.0.0-alpha.12",
 ]
 

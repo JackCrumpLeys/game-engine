@@ -43,6 +43,7 @@ log = "0.4.28"
 smallvec = "2.0.0-alpha.12"
 vulkano = "0.35.2"
 paste = "1.0"
+rayon = "1.11.0"
 game_engine_derive = { path = "crates/game_engine_derive" }
 game_engine_shaders = { path = "crates/game_engine_shaders" }
 game_engine_shaders_types = { path = "crates/game_engine_shaders_types" }

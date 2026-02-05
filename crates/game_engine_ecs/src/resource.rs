@@ -26,28 +26,38 @@ impl ResourceCell {
     }
 }
 
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub struct ResourceId(usize);
+
 pub struct Resources {
-    map: TypeIdMap<ResourceCell>,
+    map: TypeIdMap<ResourceId>,
+    resources: Vec<ResourceCell>,
 }
 
 impl Resources {
     pub fn new() -> Self {
         Self {
             map: TypeIdMap::default(),
+            resources: Vec::new(),
         }
     }
 
     /// Inserts a resource of type R.
     /// panics if a resource of this type is already borrowed.
     pub fn insert<R: Resource>(&mut self, resource: R) {
-        self.map
-            .insert(TypeId::of::<R>(), ResourceCell::new(Box::new(resource)));
+        let idx = self.resources.len();
+        self.resources.push(ResourceCell::new(Box::new(resource)));
+        self.map.insert(TypeId::of::<R>(), ResourceId(idx));
     }
 
     pub fn register<R: Resource + Default>(&mut self) {
-        self.map
-            .entry(TypeId::of::<R>())
-            .or_insert_with(|| ResourceCell::new(Box::new(R::default())));
+        self.map.entry(TypeId::of::<R>()).or_insert_with(|| {
+            let idx = self.resources.len();
+            self.resources
+                .push(ResourceCell::new(Box::new(R::default())));
+            ResourceId(idx)
+        });
     }
 
     /// Gets an immutable reference to a resource of type R.
@@ -57,21 +67,24 @@ impl Resources {
         // 2. Try borrow.borrow() -> Panic if fails (or return None? Bevy panics on contention)
         // 3. Construct Res wrapper
 
-        self.map.get(&TypeId::of::<R>()).map(|cell| {
-            if !cell.borrow.borrow() {
-                panic!("Resource of this type is already mutably borrowed, cannot get immutable reference. {}", type_name::<R>());
-            }
+        self.map.get(&TypeId::of::<R>())
+            .map(|idx| &self.resources[idx.0])
+            .map(|cell| {
+                if !cell.borrow.borrow() {
+                    panic!("Resource of this type is already mutably borrowed, cannot get immutable reference. {}", type_name::<R>());
+                }
 
-            // Safety: We have an immutable borrow, so it's safe to create an immutable reference.
-            let value = unsafe { &*cell.data.get() }
-                .downcast_ref::<R>()
-                .expect("Resource type mismatch");
+                // Safety: We have an immutable borrow, so it's safe to create an immutable reference.
+                let value = unsafe { &*cell.data.get() }
+                    .downcast_ref::<R>()
+                    .expect("Resource type mismatch");
 
-            Res {
-                value,
-                borrow: &cell.borrow,
+                Res {
+                    value,
+                    borrow: &cell.borrow,
+                }
             }
-        })
+        )
     }
 
     /// Gets a mutable reference to a resource of type R.
@@ -81,24 +94,82 @@ impl Resources {
         // 2. Try borrow.borrow_mut()
         // 3. Construct ResMut wrapper
 
-        self.map.get(&TypeId::of::<R>()).map(|cell| {
-            if !cell.borrow.borrow_mut() {
-                panic!(
-                    "Resource of this type is already borrowed, cannot get mutable reference. {}",
-                    type_name::<R>()
-                );
-            }
+        self.map.get(&TypeId::of::<R>())
+            .map(|idx| &self.resources[idx.0])
+            .map(|cell| {
+                if !cell.borrow.borrow_mut() {
+                    panic!(
+                        "Resource of this type is already borrowed, cannot get mutable reference. {}",
+                        type_name::<R>()
+                    );
+                }
 
-            // Safety: We have a mutable borrow, so it's safe to create a mutable reference.
-            let value = unsafe { &mut *cell.data.get() }
-                .downcast_mut::<R>()
-                .expect("Resource type mismatch");
+                // Safety: We have a mutable borrow, so it's safe to create a mutable reference.
+                let value = unsafe { &mut *cell.data.get() }
+                    .downcast_mut::<R>()
+                    .expect("Resource type mismatch");
 
-            ResMut {
-                value,
-                borrow: &cell.borrow,
+                ResMut {
+                    value,
+                    borrow: &cell.borrow,
+                }
             }
-        })
+        )
+    }
+
+    /// Get the id of the given resource if it is registered
+    pub fn get_id<R: Resource>(&self) -> Option<ResourceId> {
+        self.map.get(&TypeId::of::<R>()).cloned()
+    }
+
+    /// Get resource value of R via id immutably
+    /// panics if the resource is already borrowed.
+    ///
+    /// # Safety
+    /// - The resource at id but be of type R.
+    pub fn get_from_id<R: Resource>(&'_ self, id: ResourceId) -> Option<Res<'_, R>> {
+        self.resources.get(id.0)
+            .map(|cell| {
+                if !cell.borrow.borrow() {
+                    panic!("Resource of this type is already mutably borrowed, cannot get immutable reference. {}", type_name::<R>());
+                }
+
+                // Safety: We have an immutable borrow, so it's safe to create an immutable reference.
+                let value = unsafe { &*cell.data.get() }
+                    .downcast_ref::<R>()
+                    .expect("Resource type mismatch");
+
+                Res {
+                    value,
+                    borrow: &cell.borrow,
+                }
+            }
+        )
+    }
+
+    /// Get resource value of R via id mutably
+    /// panics if the resource is already borrowed.
+    ///
+    /// # Safety
+    /// - The resource at id but be of type R.
+    pub fn get_mut_from_id<R: Resource>(&'_ self, id: ResourceId) -> Option<ResMut<'_, R>> {
+        self.resources.get(id.0)
+            .map(|cell| {
+                if !cell.borrow.borrow_mut() {
+                    panic!("Resource of this type is already mutably borrowed, cannot get immutable reference. {}", type_name::<R>());
+                }
+
+                // Safety: We have an immutable borrow, so it's safe to create an immutable reference.
+                let value = unsafe { &mut *cell.data.get() }
+                    .downcast_mut::<R>()
+                    .expect("Resource type mismatch");
+
+                ResMut {
+                    value,
+                    borrow: &cell.borrow,
+                }
+            }
+        )
     }
 
     /// Get or insert default resource of type R.

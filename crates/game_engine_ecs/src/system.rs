@@ -1,11 +1,14 @@
 pub mod command;
 pub mod function;
 
+use game_engine_utils::NoOpHash;
+
 use crate::archetype::ArchetypeId;
 use crate::borrow::ColumnBorrowChecker;
 use crate::prelude::{Res, ResMut, Resource};
 use crate::query::{Filter, GetGuard, QueryInner, QueryIter, QueryToken, ReadOnly, View};
-use crate::world::World;
+use crate::resource::ResourceId;
+use crate::world::{ChangeTick, World};
 use std::any::TypeId;
 use std::collections::HashSet;
 use std::ops::{Deref, DerefMut};
@@ -47,28 +50,30 @@ impl<'w> UnsafeWorldCell<'w> {
 unsafe impl<'w> Send for UnsafeWorldCell<'w> {}
 unsafe impl<'w> Sync for UnsafeWorldCell<'w> {}
 
+pub type TypeIdSet = HashSet<TypeId, NoOpHash>;
+
 /// Metadata about what a system accesses.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SystemAccess {
     pub col: Vec<ColumnBorrowChecker>, // must be the same length as world.archetypes
-    pub resources_read: HashSet<std::any::TypeId>,
-    pub resources_write: HashSet<std::any::TypeId>,
+    pub resources_read: TypeIdSet,
+    pub resources_write: TypeIdSet,
 }
 
 impl SystemAccess {
     pub fn new(world: &World) -> Self {
         Self {
             col: vec![ColumnBorrowChecker::new(); world.archetypes.len()],
-            resources_read: HashSet::new(),
-            resources_write: HashSet::new(),
+            resources_read: TypeIdSet::default(),
+            resources_write: TypeIdSet::default(),
         }
     }
 
     pub fn new_empty() -> Self {
         Self {
             col: Vec::new(),
-            resources_read: HashSet::new(),
-            resources_write: HashSet::new(),
+            resources_read: TypeIdSet::default(),
+            resources_write: TypeIdSet::default(),
         }
     }
 
@@ -103,10 +108,10 @@ pub trait System: Send + Sync + 'static {
 
 /// A parameter that can be passed into a system function.
 pub trait SystemParam {
-    /// The state cached between runs (e.g. ComponentIds, ArchetypeCache, or Local<T>)
+    /// The state cached between runs
     type State: Send + Sync + 'static;
 
-    /// The item passed to the function (e.g. Query<'w, ...>)
+    /// The item passed to the function
     type Item<'w>;
 
     /// Does the accsess depend on world state (eg: adding/removing archetypes)?
@@ -175,43 +180,58 @@ impl<T: Send + Sync + Default + 'static> SystemParam for Local<'_, T> {
 
 /// Res<T> provides immutable access to a Resource of type T.
 impl<T: Send + Sync + 'static> SystemParam for Res<'_, T> {
-    type State = ();
+    type State = ResourceId;
     type Item<'w> = Res<'w, T>;
 
-    fn init_state(_world: &mut World, access: &mut SystemAccess) -> Self::State {
+    fn init_state(world: &mut World, access: &mut SystemAccess) -> Self::State {
         access.resources_read.insert(TypeId::of::<T>());
+
+        world.resources().get_id::<T>().unwrap_or_else(|| {
+            panic!(
+                "Resource of type {} not found. Insert before adding systems using it.",
+                std::any::type_name::<T>()
+            )
+        })
     }
 
     unsafe fn get_param<'w>(
-        _state: &'w mut Self::State,
+        res_id: &'w mut Self::State,
         world: &UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
         let world = unsafe { world.world() };
         world
             .resources()
-            .get::<T>()
+            .get_from_id(*res_id)
             .unwrap_or_else(|| panic!("Resource of type {} not found", std::any::type_name::<T>()))
     }
 }
 
 /// ResMut<T> provides mutable access to a Resource of type T.
 impl<T: Send + Sync + 'static> SystemParam for ResMut<'_, T> {
-    type State = ();
+    type State = ResourceId;
     type Item<'w> = ResMut<'w, T>;
 
-    fn init_state(_world: &mut World, access: &mut SystemAccess) -> Self::State {
+    fn init_state(world: &mut World, access: &mut SystemAccess) -> Self::State {
         access.resources_write.insert(TypeId::of::<T>());
+
+        world.resources().get_id::<T>().unwrap_or_else(|| {
+            panic!(
+                "Resource of type {} not found. Insert before adding systems using it.",
+                std::any::type_name::<T>()
+            )
+        })
     }
 
     unsafe fn get_param<'w>(
-        _state: &'w mut Self::State,
+        res_id: &'w mut Self::State,
         world: &UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
         // Safety: The scheduler ensures mutable access of this specific resource is safe.
         let world = unsafe { world.world_mut() };
+
         world
             .resources_mut()
-            .get_mut::<T>()
+            .get_mut_from_id(*res_id)
             .unwrap_or_else(|| panic!("Resource of type {} not found", std::any::type_name::<T>()))
     }
 }
@@ -220,7 +240,7 @@ pub struct Query<'w, Q: QueryToken, F: Filter = ()> {
     // Now uses a shared reference because QueryInner uses RefCell interior mutability
     query: &'w QueryInner<Q::Persistent, F::Persistent>,
     world: &'w UnsafeWorldCell<'w>,
-    tick: u32,
+    tick: ChangeTick,
 }
 
 impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
@@ -237,7 +257,6 @@ impl<'w, Q: QueryToken, F: Filter> Query<'w, Q, F> {
     where
         Func: FnMut(<Q::View<'a> as View<'a>>::Item),
     {
-        let world = unsafe { self.world.world_mut() };
         self.query
             .for_each::<Q::View<'a>, F, Func>(self.world, func, self.tick)
     }
@@ -277,7 +296,11 @@ impl<'w, Q: QueryToken + ReadOnly, F: Filter> Query<'w, Q, F> {
 }
 
 impl<Q: QueryToken, F: Filter> SystemParam for Query<'_, Q, F> {
-    type State = (QueryInner<Q::Persistent, F::Persistent>, ArchetypeId, u32);
+    type State = (
+        QueryInner<Q::Persistent, F::Persistent>,
+        ArchetypeId,
+        ChangeTick,
+    );
     type Item<'w> = Query<'w, Q, F>;
 
     const DYNAMIC: bool = true;
@@ -292,7 +315,7 @@ impl<Q: QueryToken, F: Filter> SystemParam for Query<'_, Q, F> {
         (
             query,
             ArchetypeId(world.archetypes.len()),
-            world.tick().wrapping_sub(1),
+            world.tick().0.wrapping_sub(1).into(),
         )
     }
 

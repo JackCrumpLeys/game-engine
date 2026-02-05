@@ -5,7 +5,7 @@ use std::{
 
 use crate::world::World;
 
-pub const MAX_ECS_THREADS: usize = 1028; // Far more than enough for most use cases
+pub const MAX_ECS_THREADS: usize = 128; // Far more than enough for most use cases
 
 static THREAD_COUNTER: AtomicUsize = AtomicUsize::new(0);
 

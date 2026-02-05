@@ -17,13 +17,33 @@ pub mod threading;
 pub mod world;
 
 pub mod prelude {
-    pub use crate::bundle::Bundle;
-    pub use crate::component::{Component, ComponentId, ComponentRegistry};
+    // src/prelude.rs
+
+    // Core World and Entities
     pub use crate::entity::Entity;
-    pub use crate::message::{Message, MessageReader, MessageWriter};
-    pub use crate::query::Filter;
-    pub use crate::resource::{Res, ResMut, Resource, Resources};
-    pub use crate::system::function::{FunctionSystem, IntoSystem};
-    pub use crate::system::{Query, System, SystemParam};
     pub use crate::world::World;
+
+    // Components and Bundles
+    pub use crate::bundle::Bundle;
+    pub use crate::component::{Component, ComponentId};
+
+    // Resources
+    pub use crate::resource::{Res, ResMut, Resource, Resources};
+
+    // Systems and Parameters
+    pub use crate::system::{Local, Query, System, function::IntoSystem};
+
+    // Command Buffer (for spawning/despawning/inserting deferred)
+    pub use crate::system::command::Command;
+
+    // Query Filters
+    pub use crate::query::{Changed, Filter, With, Without};
+
+    // Scheduling and System Configuration
+    pub use crate::schedule::{IntoSystemConfigs, IntoSystemSet, Schedule, SystemSet};
+
+    // Messaging / Events
+    pub use crate::message::{Message, MessageReader, MessageWriter};
 }
+
+extern crate self as game_engine_ecs;

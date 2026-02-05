@@ -7,11 +7,15 @@ edition = "2024"
 smallvec.workspace = true
 game_engine_derive.workspace = true
 log.workspace = true
+rayon.workspace = true
+paste.workspace = true
 game_engine_utils.workspace = true
 
 [dev-dependencies]
 bevy_ecs = "0.17"
 criterion = "0.8"
+rayon.workspace = true
+
 
 [profile.release]
 lto = "fat"
@@ -36,4 +40,12 @@ harness = false
 
 [[bench]]
 name = "spawn_bench"
+harness = false
+
+[[bench]]
+name = "flush"
+harness = false
+
+[[bench]]
+name = "bevy_v_me"
 harness = false

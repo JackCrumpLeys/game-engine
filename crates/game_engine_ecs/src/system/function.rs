@@ -138,7 +138,7 @@ mod function_tests {
     use super::*;
     use crate::message::MessageQueue;
     use crate::prelude::*;
-    use crate::query::{Changed, QueryState};
+    use crate::query::Changed;
     use crate::system::{Query, UnsafeWorldCell};
 
     // ========================================================================
@@ -252,7 +252,7 @@ mod function_tests {
         }
 
         // 4. Verify Side Effects via standard QueryState
-        let q = QueryState::<&Position>::new(&mut world);
+        let q = world.query::<&Position, ()>();
         let pos = q.iter().next().unwrap();
 
         assert_eq!(pos.x, 1.0);
@@ -298,8 +298,6 @@ mod function_tests {
         app.run();
 
         // Check Position (Movement ran once, Complex didn't run because frame was 0 at start of frame)
-        // Note: complex_system reads frame count. Frame count is updated AFTER complex system in the list?
-        // Actually order matters here.
         // systems: [movement, frame, complex]
         // 1. movement: x=1.0
         // 2. frame: count=1
@@ -309,7 +307,7 @@ mod function_tests {
             assert_eq!(res.0, 1);
         }
 
-        let q = QueryState::<&Position>::new(&mut app.world);
+        let q = app.world.query::<&Position, ()>();
         let pos = q.iter().next().unwrap();
         assert_eq!(pos.x, 101.0);
     }
@@ -382,7 +380,7 @@ mod function_tests {
 
         {
             // Mutate manually via direct world access to simulate another system
-            let mut q = QueryState::<&mut Position>::new(&mut app.world);
+            let mut q = app.world.query::<&mut Position, ()>();
             let mut pos = q.get_mut(e).unwrap();
             pos.x += 1.0;
             // Guard drop updates component tick to 3

@@ -1,22 +1,23 @@
-use crate::component::{Component, ComponentId, ComponentMask, ComponentMeta};
-use crate::storage::TypeErasedSequence;
-use std::any::type_name;
+use crate::component::{Component, ComponentId, ComponentMeta};
+use crate::storage::{ComponentStorage, TypeErasedSequence};
 
-pub trait Bundle {
-    fn mask() -> ComponentMask;
+pub trait Bundle: 'static + Send + Sync {
+    /// Returns an iterator over all unique component IDs in this bundle.
+    fn component_ids() -> impl Iterator<Item = ComponentId>;
 
-    /// Returns the list of component IDs in this bundle.
-    /// Registers them if not present.
-    fn component_ids() -> Vec<ComponentId>;
+    /// Returns an iterator over all component metadata in this bundle.
+    /// The order MUST match `component_ids()`.
+    fn component_metas() -> impl Iterator<Item = ComponentMeta>;
 
-    /// Returns the metadata for each component in this bundle.
-    fn component_metas() -> Vec<ComponentMeta>;
-
-    /// Writes the bundle's data into the given TypeErasedSequences.
+    /// Writes the bundle's data into the given storages.
+    ///
     /// # Safety
-    /// `columns` and `ids` must be perfectly aligned (index N in ids corresponds to index N in columns).
-    /// `ids` must contain ALL ComponentIds provided by this bundle.
-    unsafe fn put(self, columns: &mut [&mut TypeErasedSequence], ids: &[ComponentId]);
+    /// - `columns` must be a slice of `Option<Storage>` of size `MAX_COMPONENTS`.
+    /// - For every `ComponentId` returned by `component_ids()`, the corresponding entry
+    ///   in `columns` at `columns[id.0]` must be `Some`.
+    /// - The storage `Storage` at `columns[id.0]` must have been created with the correct
+    ///   `ComponentMeta` for the component with that `id`.
+    unsafe fn put<Storage: ComponentStorage>(self, columns: &mut [Option<Storage>]);
 }
 
 pub trait ManyRowBundle {
@@ -35,68 +36,96 @@ pub trait ManyRowBundle {
     }
 }
 
-// Macro to implement Bundle for tuples (A, B, C...)
-macro_rules! impl_bundle {
-    ($($name:ident $num: tt),*) => {
-        impl<$($name: Component),*> Bundle for ($($name,)*) {
+// --- Base Case: A single component is a bundle ---
+impl<T: Component> Bundle for T {
+    #[inline(always)]
+    fn component_ids() -> impl Iterator<Item = ComponentId> {
+        std::iter::once(T::get_id())
+    }
 
+    #[inline(always)]
+    fn component_metas() -> impl Iterator<Item = ComponentMeta> {
+        std::iter::once(T::meta())
+    }
+
+    #[inline(always)]
+    unsafe fn put<Storage: ComponentStorage>(self, columns: &mut [Option<Storage>]) {
+        // The logic guarantees that the column for this component exists.
+        // We use unchecked access for performance.
+        let column = unsafe {
+            columns
+                .get_unchecked_mut(T::get_id().0)
+                .as_mut()
+                .unwrap_unchecked()
+        };
+        // The caller guarantees the storage type matches the component type.
+        unsafe { column.submit(self) };
+    }
+}
+
+// --- Recursive Case: Tuples of bundles are bundles ---
+macro_rules! impl_recursive_bundle {
+    // Note: The `$num` tt is not used here but is required by `auto_impl_all_tuples`.
+    ($($name:ident $num:tt),*) => {
+        impl<$($name: Bundle),*> Bundle for ($($name,)*) {
             #[inline(always)]
-            fn mask() -> ComponentMask {
-                let mut mask = ComponentMask::new();
+            fn component_ids() -> impl Iterator<Item = ComponentId> {
+                std::iter::empty()
                 $(
-                    mask.set_id(&$name::get_id());
+                    .chain($name::component_ids())
                 )*
-                mask
             }
 
             #[inline(always)]
-            fn component_ids() -> Vec<ComponentId> {
-                // make sure no overlap
-                {
-                    let mut mask = ComponentMask::new();
-                    $(
-                        let id = $name::get_id();
-                        assert!(!mask.has(id.0), "Duplicate component in bundle: {}", type_name::<$name>());
-                        mask.set(id.0);
-                    )*
-                }
-                vec![$(
-                    $name::get_id(),
-                )*]
+            fn component_metas() -> impl Iterator<Item = ComponentMeta> {
+                std::iter::empty()
+                $(
+                    .chain($name::component_metas())
+                )*
             }
 
             #[inline(always)]
-            fn component_metas() -> Vec<ComponentMeta> {
-                vec![$(
-                    $name::meta(),
-                )*]
-            }
-
-            #[inline(always)]
-            unsafe fn put(
-                self,
-                columns: &mut [&mut TypeErasedSequence],
-                ids: &[ComponentId] // These are the Archetype's sorted IDs
-            ) {
-                #[allow(non_snake_case)]
+            #[allow(non_snake_case)]
+            unsafe fn put<Storage: ComponentStorage>(self, columns: &mut [Option<Storage>]) {
                 let ($($name,)*) = self;
-
-                unsafe {
-                    $(
-                        // 1. Find the column index for this component
-                        // Since `ids` is sorted (Archetypes are sorted), this is fast.
-                        // We use unwrap_unchecked because we know the archetype matches the bundle mask.
-                        let id = $name::get_id(); // Or registry lookup if not using static IDs
-                        let index = ids.binary_search(&id).unwrap_unchecked();
-
-                        // 2. Write directly to that column
-                        columns.get_unchecked_mut(index).push($name);
-                    )*
-                }
+                $(
+                    unsafe { $name.put(columns) };
+                )*
             }
         }
+    };
+}
 
+// --- Empty Bundle Implementation ---
+impl Bundle for () {
+    #[inline(always)]
+    fn component_ids() -> impl Iterator<Item = ComponentId> {
+        std::iter::empty()
+    }
 
+    #[inline(always)]
+    fn component_metas() -> impl Iterator<Item = ComponentMeta> {
+        std::iter::empty()
+    }
+
+    #[inline(always)]
+    unsafe fn put<Storage: ComponentStorage>(self, _columns: &mut [Option<Storage>]) {
+        // Does nothing
+    }
+}
+
+// Generate implementations for tuples using the auto macro
+auto_impl_all_tuples!(impl_recursive_bundle);
+
+// ==================================================================================
+// ManyRowBundle - This is harder to make recursive with the current constraints.
+// It's highly optimized for Vecs of concrete component tuples.
+// We will keep the old macro for this for now.
+// ==================================================================================
+
+// Macro to implement Bundle for tuples (A, B, C...)
+macro_rules! impl_many_row_bundle {
+    ($($name:ident $num: tt),*) => {
         impl<$($name: Component),*> ManyRowBundle for Vec<($($name,)*)> {
             type Item = ($($name,)*);
 
@@ -139,20 +168,6 @@ macro_rules! impl_bundle {
     }
 }
 
-// Implement for Unit
-impl Bundle for () {
-    fn component_ids() -> Vec<ComponentId> {
-        vec![]
-    }
-    fn component_metas() -> Vec<ComponentMeta> {
-        vec![]
-    }
-    unsafe fn put(self, _columns: &mut [&mut TypeErasedSequence], _ids: &[ComponentId]) {}
-
-    fn mask() -> ComponentMask {
-        ComponentMask::new()
-    }
-}
 impl ManyRowBundle for Vec<()> {
     type Item = ();
     unsafe fn put_many(self, _s: &mut [&mut TypeErasedSequence]) {}
@@ -162,4 +177,4 @@ impl ManyRowBundle for Vec<()> {
 }
 
 // Call the macro
-auto_impl_all_tuples!(impl_bundle);
+auto_impl_all_tuples!(impl_many_row_bundle);

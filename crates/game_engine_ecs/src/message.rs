@@ -8,7 +8,7 @@ pub trait Message: 'static + Send + Sync {}
 impl<T: Resource> Message for T {}
 
 /// Double buffered message queue for ECS systems.
-pub(crate) struct MessageQueue<T: Message> {
+pub struct MessageQueue<T: Message> {
     lowest_id: MessageId<T>,
     front_buffer: Vec<T>,
     back_buffer: Vec<T>,
@@ -221,29 +221,31 @@ impl<'a, T: Message> MessageWriter<'a, T> {
 }
 
 impl<T: Message> SystemParam for MessageWriter<'_, T> {
-    type State = ();
+    type State = <ResMut<'static, MessageQueue<T>> as SystemParam>::State;
     type Item<'w> = MessageWriter<'w, T>;
 
     fn init_state(world: &mut World, access: &mut SystemAccess) -> Self::State {
         access.write_resource::<T>();
         world.resources_mut().register::<MessageQueue<T>>();
+
+        ResMut::<MessageQueue<T>>::init_state(world, access)
     }
 
     unsafe fn get_param<'w>(
-        _state: &'w mut Self::State,
-        u_world: &UnsafeWorldCell<'w>,
+        state: &'w mut Self::State,
+        u_world: &'w UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
-        let world = unsafe { u_world.world_mut() };
-
-        // We inser in init_state, so it must exist L
-        let queue = world.resources_mut().get_mut::<MessageQueue<T>>().unwrap();
-
-        MessageWriter { queue }
+        MessageWriter {
+            queue: unsafe { ResMut::<MessageQueue<T>>::get_param(state, u_world) },
+        }
     }
 }
 
 impl<T: Message> SystemParam for MessageReader<'_, T> {
-    type State = MessageId<T>;
+    type State = (
+        MessageId<T>,
+        <Res<'static, MessageQueue<T>> as SystemParam>::State,
+    );
     type Item<'w> = MessageReader<'w, T>;
 
     fn init_state(world: &mut World, access: &mut SystemAccess) -> Self::State {
@@ -251,17 +253,19 @@ impl<T: Message> SystemParam for MessageReader<'_, T> {
 
         world.resources_mut().register::<MessageQueue<T>>();
 
-        MessageId::new(0)
+        (
+            MessageId::new(0),
+            Res::<MessageQueue<T>>::init_state(world, access),
+        )
     }
 
     unsafe fn get_param<'w>(
-        read_from: &'w mut Self::State,
-        u_world: &UnsafeWorldCell<'w>,
+        state: &'w mut Self::State,
+        u_world: &'w UnsafeWorldCell<'w>,
     ) -> Self::Item<'w> {
-        let world = unsafe { u_world.world() };
+        let (read_from, res_state) = state;
 
-        // We inser in init_state, so it must exist L
-        let queue = world.resources().get::<MessageQueue<T>>().unwrap();
+        let queue = unsafe { Res::<MessageQueue<T>>::get_param(res_state, u_world) };
         // We should always be at most len + offset, as the reader wont increase beyond
         // that
 

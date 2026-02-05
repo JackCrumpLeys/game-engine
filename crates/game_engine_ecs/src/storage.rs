@@ -5,8 +5,16 @@ use std::ptr::{self, NonNull};
 use crate::borrow::AtomicBorrow;
 use crate::component::ComponentMeta;
 use crate::prelude::Component;
+use crate::world::ChangeTick;
 
 const BASE_LEN: usize = 64;
+
+pub trait ComponentStorage {
+    /// Appends an element.
+    /// # Safety
+    /// T must match the layout of the storage.
+    unsafe fn submit<T>(&mut self, value: T);
+}
 
 pub struct TypeErasedSequence {
     ptr: NonNull<u8>,
@@ -39,6 +47,12 @@ impl std::fmt::Debug for TypeErasedSequence {
                 vec
             })
             .finish()
+    }
+}
+
+impl ComponentStorage for TypeErasedSequence {
+    unsafe fn submit<T>(&mut self, value: T) {
+        unsafe { self.push(value) };
     }
 }
 
@@ -300,8 +314,15 @@ impl TypeErasedSequence {
 pub struct Column {
     inner: TypeErasedSequence,
     borrow_state: AtomicBorrow,
-    mutated_ticks: Vec<u32>,
-    tick: u32,
+    mutated_ticks: Vec<ChangeTick>,
+    tick: ChangeTick,
+}
+
+impl ComponentStorage for Column {
+    unsafe fn submit<T>(&mut self, value: T) {
+        // SAFETY: The caller of Bundle::put must ensure that the types match.
+        unsafe { self.push(value) };
+    }
 }
 
 impl Column {
@@ -313,7 +334,7 @@ impl Column {
             inner: TypeErasedSequence::new(&T::meta()),
             borrow_state: AtomicBorrow::new(),
             mutated_ticks: Vec::new(),
-            tick: 0,
+            tick: ChangeTick(0),
         }
     }
 
@@ -322,7 +343,7 @@ impl Column {
             inner: TypeErasedSequence::new(meta),
             borrow_state: AtomicBorrow::new(),
             mutated_ticks: Vec::new(),
-            tick: 0,
+            tick: ChangeTick(0),
         }
     }
 
@@ -370,8 +391,8 @@ impl Column {
         self.push_ticks(count);
     }
 
-    pub fn set_tick(&mut self, tick: u32) {
-        self.tick = tick;
+    pub fn set_tick(&mut self, tick: impl Into<ChangeTick>) {
+        self.tick = tick.into();
     }
 
     pub fn len(&self) -> usize {
@@ -379,7 +400,7 @@ impl Column {
     }
 
     /// Get a pointer to the mutated ticks array.
-    pub fn get_ticks_ptr(&mut self) -> *mut u32 {
+    pub fn get_ticks_ptr(&mut self) -> *mut ChangeTick {
         self.mutated_ticks.as_mut_ptr()
     }
 
@@ -515,13 +536,25 @@ mod storage_tests {
             col.push(30u32);
         }
 
-        assert_eq!(col.mutated_ticks[..col.len()], vec![1, 2, 3]);
+        assert_eq!(
+            col.mutated_ticks[..col.len()],
+            vec![1u64, 2, 3]
+                .into_iter()
+                .map(Into::<ChangeTick>::into)
+                .collect::<Vec<_>>()
+        );
 
         // Remove index 1
         col.swap_remove(1);
 
         assert_eq!(col.len(), 2);
-        assert_eq!(col.mutated_ticks[..col.len()], vec![1, 3]);
+        assert_eq!(
+            col.mutated_ticks[..col.len()],
+            vec![1u64, 3]
+                .into_iter()
+                .map(Into::<ChangeTick>::into)
+                .collect::<Vec<_>>()
+        );
     }
 
     // ============================================================================

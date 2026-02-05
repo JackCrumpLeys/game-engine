@@ -2,7 +2,7 @@ use std::alloc::Layout;
 use std::fmt::{self, Debug};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub const MAX_COMPONENTS: usize = 64;
+pub const MAX_COMPONENTS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(transparent)]
