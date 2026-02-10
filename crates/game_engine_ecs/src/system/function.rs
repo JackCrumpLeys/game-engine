@@ -1,5 +1,6 @@
 use crate::system::{System, SystemAccess, SystemParam, UnsafeWorldCell};
 use crate::world::World;
+use std::any::type_name;
 use std::marker::PhantomData;
 
 /// The structure that wraps a user function to make it a System.
@@ -48,6 +49,10 @@ where
     }
 
     unsafe fn run(&mut self, world: &UnsafeWorldCell) {
+        let _trace = tracy_client::Client::running()
+            .expect("span! without a running Client")
+            .span_alloc(None, self.name.as_str(), file!(), line!(), 10);
+
         let state = self.state.as_mut().expect("System not initialized");
         let item = unsafe { Params::get_param(state, world) };
         self.func.run(item);

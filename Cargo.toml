@@ -42,7 +42,6 @@ members = ["crates/*"]
 
 [workspace.dependencies]
 log = "0.4.28"
-tracy-client = {version="0.18.4", features=["demangle"]}
 smallvec = "2.0.0-alpha.12"
 vulkano = "0.35.2"
 paste = "1.0"
@@ -66,3 +65,17 @@ git = "https://github.com/Rust-GPU/rust-gpu.git"
 rev = "b3eda4df9814b6176d3c0844eb67f70a22ebb378"
 package = "spirv-std"
 features = ["bytemuck"]
+
+[workspace.dependencies.tracy-client]
+version="0.18.4"
+features=[
+  "demangle",
+  "system-tracing",
+  "context-switch-tracing",
+  "sampling",
+  "code-transfer",
+  "broadcast",
+  "callstack-inlines",
+  "crash-handler"
+]
+defualt-features = false

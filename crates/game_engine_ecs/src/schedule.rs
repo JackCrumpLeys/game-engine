@@ -1,3 +1,5 @@
+use core_affinity::get_core_ids;
+use core_affinity::set_for_current;
 use game_engine_utils::graph::DirectedGraph;
 use game_engine_utils::graph::DirectedGraphOperations;
 use game_engine_utils::graph::NodeIndex;
@@ -522,8 +524,12 @@ impl Schedule {
 
     /// Executes foever or a number of times
     pub fn run(&mut self, world: &mut World, amount: Option<u64>) {
+        let core_ids = get_core_ids().unwrap();
         let pool = rayon::ThreadPoolBuilder::new()
             .thread_name(|i| format!("ecs-worker-{}", i))
+            .start_handler(move |id| {
+                set_for_current(core_ids[id % core_ids.len()]);
+            })
             .build()
             .unwrap();
 

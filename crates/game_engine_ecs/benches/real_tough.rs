@@ -170,18 +170,17 @@ fn bench_torture(c: &mut Criterion) {
     // and algorithmic complexity (O(N)) dominates overhead.
     let count = 100_000;
 
+    let core_ids = get_core_ids().unwrap();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .thread_name(|i| format!("ecs-worker-{}", i))
+        .start_handler(move |id| {
+            set_for_current(core_ids[id % core_ids.len()]);
+        })
+        .build()
+        .unwrap();
+
     group.bench_function("schedule_run_100k_fragmented", |b| {
         let (mut world, mut schedule) = setup_world(count);
-
-        let core_ids = get_core_ids().unwrap();
-        let pool = rayon::ThreadPoolBuilder::new()
-            .thread_name(|i| format!("ecs-worker-{}", i))
-            .start_handler(move |id| {
-                // Pin each worker thread to its corresponding core ID
-                set_for_current(core_ids[id % core_ids.len()]);
-            })
-            .build()
-            .unwrap();
 
         schedule.build_graph(&world);
 

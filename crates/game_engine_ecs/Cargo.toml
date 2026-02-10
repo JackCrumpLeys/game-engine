@@ -5,7 +5,7 @@ edition = "2024"
 
 
 [features]
-tracy = ["dep:tracy-client"]
+tracy = ["tracy-client/enable"]
 
 [dependencies]
 smallvec.workspace = true
@@ -15,7 +15,7 @@ rayon.workspace = true
 paste.workspace = true
 game_engine_utils.workspace = true
 rustc-hash.workspace = true 
-tracy-client = { workspace=true,optional=true }
+tracy-client = { workspace=true }
 core_affinity = "0.8.3"
 
 [dev-dependencies]
