@@ -106,8 +106,12 @@ pub trait System: Send + Sync + 'static {
     fn update_access(&mut self, world: &World) -> bool;
 }
 
+pub struct Single;
+pub struct Many;
+
 /// A parameter that can be passed into a system function.
 pub trait SystemParam {
+    type Marker: Send + Sync + 'static = Single;
     /// The state cached between runs
     type State: Send + Sync + 'static;
 
@@ -356,6 +360,7 @@ impl<Q: QueryToken, F: Filter> SystemParam for Query<'_, Q, F> {
 macro_rules! impl_system_param_tuple {
     ($($name:ident $_:tt),*) => {
         impl<$($name: SystemParam),*> SystemParam for ($($name,)*) {
+            type Marker = Many;
             type State = ($($name::State,)*);
             type Item<'w> = ($($name::Item<'w>,)*);
 

@@ -7,6 +7,7 @@ pub mod bundle;
 pub mod component;
 pub mod entity;
 pub mod message;
+pub mod observers;
 pub mod query;
 pub mod resource;
 pub mod schedule;
@@ -17,8 +18,6 @@ pub mod threading;
 pub mod world;
 
 pub mod prelude {
-    // src/prelude.rs
-
     // Core World and Entities
     pub use crate::entity::Entity;
     pub use crate::world::World;
@@ -47,3 +46,8 @@ pub mod prelude {
 }
 
 extern crate self as game_engine_ecs;
+
+#[cfg(feature = "tracy")]
+#[global_allocator]
+static GLOBAL: tracy_client::ProfiledAllocator<std::alloc::System> =
+    tracy_client::ProfiledAllocator::new(std::alloc::System, 100);

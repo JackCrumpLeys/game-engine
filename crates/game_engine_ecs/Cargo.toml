@@ -3,6 +3,10 @@ name = "game_engine_ecs"
 version = "0.1.0"
 edition = "2024"
 
+
+[features]
+tracy = ["dep:tracy-client"]
+
 [dependencies]
 smallvec.workspace = true
 game_engine_derive.workspace = true
@@ -10,6 +14,9 @@ log.workspace = true
 rayon.workspace = true
 paste.workspace = true
 game_engine_utils.workspace = true
+rustc-hash.workspace = true 
+tracy-client = { workspace=true,optional=true }
+core_affinity = "0.8.3"
 
 [dev-dependencies]
 bevy_ecs = "0.17"
@@ -18,16 +25,16 @@ rayon.workspace = true
 
 
 [profile.release]
-lto = "fat"
 opt-level = 3
+lto = "fat"
 codegen-units = 1
-debug = true
+debug=true
 
 [profile.bench]
 lto = "fat"
 opt-level = 3
 codegen-units = 1
-debug = false
+debug=true
 
 
 [[bench]]
@@ -48,4 +55,8 @@ harness = false
 
 [[bench]]
 name = "bevy_v_me"
+harness = false
+
+[[bench]]
+name = "real_tough"
 harness = false

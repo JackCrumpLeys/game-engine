@@ -168,6 +168,16 @@ impl TypeErasedSequence {
         unsafe { self.ptr.as_ptr().add(index * self.layout.size()) }
     }
 
+    /// Get element at idx
+    pub unsafe fn get_unsafe<T>(&self, index: usize) -> &T {
+        unsafe { &*(self.ptr.as_ptr().add(index * self.layout.size()) as *const T) }
+    }
+
+    /// Get element at idx mutably
+    pub unsafe fn get_mut_unsafe<T>(&mut self, index: usize) -> &mut T {
+        unsafe { &mut *(self.ptr.as_ptr().add(index * self.layout.size()) as *mut T) }
+    }
+
     /// Removes the element at index by swapping it with the last element.
     /// panics if index is out of bounds.
     pub fn swap_remove(&mut self, index: usize) {
@@ -410,6 +420,16 @@ impl Column {
         self.inner.get_ptr(index)
     }
 
+    /// Get element at idx
+    pub unsafe fn get_unsafe<T>(&self, index: usize) -> &T {
+        unsafe { self.inner.get_unsafe(index) }
+    }
+
+    /// Get element at idx mutably
+    pub unsafe fn get_mut_unsafe<T>(&mut self, index: usize) -> &mut T {
+        unsafe { self.inner.get_mut_unsafe(index) }
+    }
+
     /// Removes the element at index by swapping it with the last element.
     /// Returns true if an element was actually moved (i.e. we didn't remove the very last one).
     /// panics if index is out of bounds.
@@ -432,6 +452,13 @@ impl Column {
         other
             .mutated_ticks
             .push(self.mutated_ticks.swap_remove(index));
+    }
+
+    pub fn changed_ticks(&self) -> &Vec<ChangeTick> {
+        &self.mutated_ticks
+    }
+    pub fn changed_ticks_mut(&mut self) -> &mut Vec<ChangeTick> {
+        &mut self.mutated_ticks
     }
 
     pub fn reserve(&mut self, additional: usize) {

@@ -3,7 +3,7 @@ use std::hint::black_box;
 use bevy_ecs::prelude::{
     Component as BevyComponent, Entity as BevyEntity, Query as BevyQuery, World as BevyWorld,
 };
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use game_engine_derive::Component;
 use game_engine_ecs::prelude::*;
 // --- Components for Your Engine ---
@@ -43,24 +43,33 @@ const CORE_COUNT: usize = 24;
 fn bench_mass_spawn(c: &mut Criterion) {
     let mut group = c.benchmark_group("Mass Spawning (1M)");
 
-    group.bench_function("My Engine: spawn loop", |b| {
-        b.iter(|| {
-            let mut world = World::new();
-            for _ in 0..ENTITY_COUNT_1M {
-                world.spawn_deferred((Position { x: 1.0, y: 1.0 }, Velocity { x: 1.0, y: 1.0 }));
-            }
-            world.flush();
-        });
+    group.bench_function("My Engine: spawn + flush", |b| {
+        b.iter_batched(
+            World::new,
+            |mut world| {
+                for _ in 0..ENTITY_COUNT_1M {
+                    world
+                        .spawn_deferred((Position { x: 1.0, y: 1.0 }, Velocity { x: 1.0, y: 1.0 }));
+                }
+                world.flush();
+            },
+            BatchSize::SmallInput,
+        );
     });
 
-    group.bench_function("Bevy: spawn loop", |b| {
-        b.iter(|| {
-            let mut world = BevyWorld::new();
-            for _ in 0..ENTITY_COUNT_1M {
-                world.spawn((BPosition { x: 1.0, y: 1.0 }, BVelocity { x: 1.0, y: 1.0 }));
-            }
-            world.flush();
-        });
+    group.bench_function("Bevy: spawn + flush", |b| {
+        b.iter_batched(
+            BevyWorld::new,
+            |mut world| {
+                for _ in 0..ENTITY_COUNT_1M {
+                    world
+                        .commands()
+                        .spawn((BPosition { x: 1.0, y: 1.0 }, BVelocity { x: 1.0, y: 1.0 }));
+                }
+                world.flush();
+            },
+            BatchSize::SmallInput,
+        );
     });
 
     group.finish();
@@ -78,6 +87,8 @@ fn bench_iteration(c: &mut Criterion) {
         my_world.spawn_deferred((Position::default(), Velocity { x: 1.0, y: 1.0 }));
     });
 
+    my_world.flush();
+
     let mut query_state = my_world.query::<(&mut Position, &Velocity), ()>();
 
     group.bench_function("My Engine: for_each", |b| {
@@ -89,6 +100,7 @@ fn bench_iteration(c: &mut Criterion) {
             });
         });
     });
+    black_box(my_world);
 
     // Setup Bevy
     let mut bevy_world = BevyWorld::new();
@@ -184,6 +196,7 @@ criterion_group!(
     bench_iteration,
     bench_fragmentation
 );
+
 fn main() {
     let pool = rayon::ThreadPoolBuilder::new()
         .thread_name(|i| format!("ecs-worker-{}", i))

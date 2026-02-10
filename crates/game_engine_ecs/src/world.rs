@@ -16,9 +16,9 @@ use crate::system::command::ThreadLocalCommandQueue;
 use crate::thread_entity_allocator::LocalThreadEntityAllocator;
 use crate::threading::{FromWorldThread, WorldThreadLocalStore};
 use std::any::type_name;
+use std::array;
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::{Arc, RwLock};
-use std::array;
 
 #[derive(Clone, Copy, Debug)]
 pub struct EntityLocation {
@@ -27,6 +27,13 @@ pub struct EntityLocation {
 }
 
 impl EntityLocation {
+    pub fn dummy() -> Self {
+        EntityLocation {
+            archetype_id: ArchetypeId(0),
+            row: 0,
+        }
+    }
+
     pub fn archetype_id(&self) -> ArchetypeId {
         self.archetype_id
     }
@@ -557,6 +564,13 @@ impl World {
     }
 
     pub fn flush(&mut self) {
+        #[cfg(feature = "tracy")]
+        let _trace = {
+            let trace = tracy_client::span!("World::flush");
+            trace.emit_color(0xFF0044);
+            trace
+        };
+
         self.flush_insert_buffer();
         let unsafe_world = UnsafeWorldCell::new(self);
         // We do this in an unsafe block because we are manually ensuring

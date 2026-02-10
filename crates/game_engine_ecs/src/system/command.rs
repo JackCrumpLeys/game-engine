@@ -44,14 +44,13 @@ pub trait CommandExecutable: Sized {
     type Output;
 
     /// The state saved to the queue for the flush phase.
-    /// Usually `Self`, but can be `()` if everything was done immediately.
     type Storage: Send + 'static;
 
     /// Do we requier a call to `execute` during flush?
     const IS_DEFERRED: bool = true;
 
     /// Runs immediately on the current thread.
-    /// Has exclusive access to thread-local resources (Entity Allocator, Insert Buffer).
+    /// Has exclusive access to thread-local resources.
     fn immediate(self, context: &mut CommandThreadLocalContext) -> (Self::Storage, Self::Output);
 
     /// Runs during `World::flush`.
@@ -259,6 +258,13 @@ impl ThreadLocalCommandQueue {
 
     /// Execute all commands and clear the buffer
     pub fn apply(&mut self, world: &mut World) {
+        #[cfg(feature = "tracy")]
+        let _trace = {
+            let trace = tracy_client::span!("Apply commands.");
+            trace.emit_color(0xFFAA00);
+            trace
+        };
+
         // "Steal" the pointers.
         let ptrs = std::mem::take(&mut self.ptrs);
 

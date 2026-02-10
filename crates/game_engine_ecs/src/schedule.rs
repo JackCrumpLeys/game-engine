@@ -377,7 +377,7 @@ impl Schedule {
         }
     }
 
-    fn build_graph(&mut self, world: &World) {
+    pub fn build_graph(&mut self, world: &World) {
         self.update_archetype(world);
 
         // Update system access patterns for the current world state
@@ -450,6 +450,13 @@ impl Schedule {
 
     /// Executes one full frame of the schedule.
     pub fn update(&mut self, world: &mut World) {
+        #[cfg(feature = "tracy")]
+        let _trace = {
+            let trace = tracy_client::span!("Update");
+            trace.emit_color(0xFFFFFF);
+            trace
+        };
+
         self.update_archetype(world);
 
         if self.needs_rebuild {
@@ -496,10 +503,10 @@ impl Schedule {
                 if changed {
                     self.build_graph(world);
                     batch_ptr = 0; // Restart iterator
-                } else {
-                    batch_ptr += 1;
+                    continue;
                 }
             }
+            batch_ptr += 1;
         }
         self.mask.reset();
 
@@ -508,6 +515,9 @@ impl Schedule {
             .iter_mut()
             .for_each(|t| t.entity_allocator.inc_tick());
         world.increment_frame();
+
+        #[cfg(feature = "tracy")]
+        let _frame = tracy_client::frame_mark();
     }
 
     /// Executes foever or a number of times
@@ -620,7 +630,6 @@ mod scheduler_tests {
     #[derive(Default)]
     struct Counter(u32);
 
-    // --- MOCK SYSTEMS ---
     fn sys_1(order: Res<ExecutionOrder>) {
         order.0.lock().unwrap().push("sys_1");
     }
@@ -630,7 +639,6 @@ mod scheduler_tests {
     fn sys_3(order: Res<ExecutionOrder>) {
         order.0.lock().unwrap().push("sys_3");
     }
-    // --- TESTS ---
 
     #[test]
     fn test_explicit_ordering_before_after() {
@@ -706,39 +714,121 @@ mod scheduler_tests {
         assert_eq!(schedule.batches[0].len(), 2);
     }
 
-    // #[test]
-    // fn basic_speed_test() {
-    //     let mut world = World::new();
+    #[test]
+    fn basic_speed_test() {
+        let mut world = World::new();
 
-    //     // System 1 spawns an entity.
-    //     // System 2 queries for that entity.
-    //     // Because System 2 is explicitly "after" System 1,
-    //     // the scheduler must flush the Command buffer between them.
+        // System 1 spawns an entity.
+        // System 2 queries for that entity.
+        // Because System 2 is explicitly "after" System 1,
+        // the scheduler must flush the Command buffer between them.
 
-    //     fn spawner(mut cmd: Command) {
-    //         cmd.spawn(A);
-    //     }
+        fn spawner(mut cmd: Command) {
+            cmd.spawn(100i32);
+        }
 
-    //     fn checker(query: Query<&A>, mut c: Local<usize>) {
-    //         *c += query.iter().count();
-    //         black_box(c);
-    //     }
+        fn checker(query: Query<&i32>, mut c: Local<usize>) {
+            *c += query.iter().count();
+            black_box(c);
+        }
 
-    //     world.resources_mut().insert(ExecutionOrder::default());
+        let mut schedule = Schedule::new();
+        schedule.add_systems((spawner, checker.after(spawner)), &mut world);
+        let now = Instant::now();
+        const TICKS: u64 = 10_000_000;
+        schedule.run(&mut world, Some(TICKS));
+        let time_taken = now.elapsed();
+        println!(
+            "{:?}. {:.2}TPS, Average tick time: {:?}",
+            time_taken,
+            TICKS as f64 / time_taken.as_secs_f64(),
+            time_taken / TICKS as u32,
+        );
+        panic!();
+    }
 
-    //     let mut schedule = Schedule::new();
-    //     schedule.add_systems((spawner, checker.after(spawner)), &mut world);
-    //     let now = Instant::now();
-    //     const TICKS: u64 = 100000;
-    //     schedule.run(&mut world, Some(TICKS));
-    //     let time_taken = now.elapsed();
-    //     println!(
-    //         "{:?}. {:.2}TPS",
-    //         time_taken,
-    //         TICKS as f64 / time_taken.as_secs_f64()
-    //     );
-    //     panic!();
-    // }
+    #[test]
+    fn heavy_stress_test() {
+        let mut world = World::new();
+
+        // Components
+        #[derive(Component, Debug, Default, Clone, Copy)]
+        struct Pos {
+            x: f32,
+            y: f32,
+        }
+        #[derive(Component, Debug, Default, Clone, Copy)]
+        struct Vel {
+            x: f32,
+            y: f32,
+        }
+        #[derive(Component, Debug, Default, Clone, Copy)]
+        struct Tag;
+
+        // System 1: Updates Velocity (Simple)
+        fn update_velocity(mut query: Query<&mut Vel>) {
+            query.for_each_mut(|mut vel| {
+                vel.x += 0.1;
+                vel.y += 0.1;
+            });
+        }
+
+        // System 2: Applies Velocity to Position (Read/Write)
+        fn apply_velocity(mut query: Query<(&mut Pos, &Vel)>) {
+            query.for_each_mut(|(mut pos, vel)| {
+                pos.x += vel.x;
+                pos.y += vel.y;
+            });
+        }
+
+        // System 3: Structural Churn (Spawn/Despawn)
+        // This forces the scheduler to re-evaluate the world every tick
+        fn churn(mut cmd: Command, query: Query<Entity, With<Tag>>) {
+            // Despawn all "Tag" entities
+            query.for_each(|e| {
+                cmd.despawn(e);
+            });
+            // Spawn 100 new ones to replace them
+            for _ in 0..100 {
+                cmd.spawn((Pos { x: 0., y: 0. }, Vel { x: 1., y: 1. }, Tag));
+            }
+        }
+
+        // Setup: 100,000 base entities
+        for _ in 0..100_000 {
+            world.spawn((Pos { x: 0., y: 0. }, Vel { x: 1., y: 1. }));
+        }
+
+        let checked = world.spawn((Pos { x: 0., y: 0. }, Vel { x: 1., y: 1. }));
+
+        let mut schedule = Schedule::new();
+        // Order: Update Vel -> Apply Vel -> Churn
+        schedule.add_systems(
+            (
+                update_velocity,
+                apply_velocity.after(update_velocity),
+                churn.after(apply_velocity),
+            ),
+            &mut world,
+        );
+
+        let now = Instant::now();
+        const TICKS: u64 = 1000;
+        schedule.run(&mut world, Some(TICKS));
+        let time_taken = now.elapsed();
+
+        println!(
+            "Total: {:?}, Avg tick: {:?}",
+            time_taken,
+            time_taken / TICKS as u32
+        );
+        println!(
+            "Proof: {:?}",
+            *world.query::<&Pos, ()>().get(checked).unwrap()
+        );
+
+        panic!();
+    }
 
     #[test]
     fn test_system_sets_ordering() {

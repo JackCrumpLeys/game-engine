@@ -317,9 +317,9 @@ impl<'a, T: Component> View<'a> for &'a T {
 }
 // The wrapper yielded by the iterator
 pub struct Mut<'a, T> {
-    value: &'a mut T,
-    tick_ptr: *mut ChangeTick,
-    current_tick: ChangeTick,
+    pub(crate) value: &'a mut T,
+    pub(crate) tick_ptr: *mut ChangeTick,
+    pub(crate) current_tick: ChangeTick,
 }
 
 impl<'a, T> std::ops::Deref for Mut<'a, T> {
