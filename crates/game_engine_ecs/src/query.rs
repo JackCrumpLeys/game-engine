@@ -662,9 +662,6 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         let mut fetch =
             unsafe { V::create_fetch(arch, &world.world().registry, world.world().tick()) }?;
 
-        // Retrieve the atomic borrow states so `GetGuard` can release them later
-        let raw_borrows = state.borrow_checker.get_raw_borrows(unsafe { &*arch });
-
         if let Some(mut skip_filter) =
             unsafe { F::create_skip_filter(arch, &world.world().registry, tick) }
         {
@@ -680,7 +677,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
 
         // Get the specific row data
         // SAFETY: `location.row()` comes from `world.entity_index` which is kept in sync with archetypes.
-        unsafe { Some(GetGuard::new(fetch.get(location.row()), raw_borrows)) }
+        unsafe { Some(GetGuard::new(fetch.get(location.row()))) }
     }
 
     /// Releases locks on all cached archetypes. Called when Iterators/Guards drop.
@@ -707,19 +704,19 @@ pub struct GetGuard<'a, T> {
     inner: T,
     /// List of atomic borrows to release on drop.
     /// Format: (Pointer to AtomicBorrow, is_mutable)
-    borrows: Vec<(&'a AtomicBorrow, bool)>,
+    borrows: PhantomData<(&'a AtomicBorrow, bool)>,
 }
 
 impl<'a, T> Drop for GetGuard<'a, T> {
     fn drop(&mut self) {
-        // Release all locks acquired for this specific access
-        for (borrow, is_mut) in &self.borrows {
-            if *is_mut {
-                borrow.release_mut();
-            } else {
-                borrow.release();
-            }
-        }
+        // // Release all locks acquired for this specific access
+        // for (borrow, is_mut) in &self.borrows {
+        //     if *is_mut {
+        //         borrow.release_mut();
+        //     } else {
+        //         borrow.release();
+        //     }
+        // }
     }
 }
 
@@ -737,8 +734,11 @@ impl<T> std::ops::DerefMut for GetGuard<'_, T> {
 }
 
 impl<'a, T> GetGuard<'a, T> {
-    fn new(inner: T, borrows: Vec<(&'a AtomicBorrow, bool)>) -> Self {
-        Self { inner, borrows }
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            borrows: PhantomData,
+        }
     }
 }
 
