@@ -1,0 +1,2 @@
+8include!(concat!(env!("OUT_DIR"), "/spiv_shaders.rs"));
+8"(71a5f6497945811504fd2ccdb1d935e2398cc96e2Hfile:///home/jackc/Documents/code/rust/game_engine/src/render/shaders.rs:2file:///home/jackc/Documents/code/rust/game_engine

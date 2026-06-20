@@ -1,8 +1,10 @@
+use smallvec::SmallVec;
+
 use crate::component::{ComponentId, ComponentMask, ComponentRegistry, MAX_COMPONENTS};
 use crate::entity::Entity;
 use crate::storage::Column;
 use std::array;
-use std::ops::Deref;
+use std::ops::{Deref, Index, IndexMut};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ArchetypeId(pub usize);
@@ -25,7 +27,7 @@ impl Deref for ArchetypeId {
 pub struct Archetype {
     pub id: ArchetypeId,
     // kept sorted for consistent hashing/lookups
-    pub component_ids: Vec<ComponentId>,
+    pub component_ids: SmallVec<ComponentId, MAX_COMPONENTS>,
     pub component_mask: ComponentMask,
     entities: Vec<Entity>,
     pub columns: [Option<Column>; MAX_COMPONENTS],
@@ -33,6 +35,191 @@ pub struct Archetype {
     with: [Option<ArchetypeId>; MAX_COMPONENTS],
     /// Index: ComponentId, Value: ArchetypeId of archetype with that component removed
     without: [Option<ArchetypeId>; MAX_COMPONENTS],
+}
+
+#[cfg_attr(debug_assertions, derive(Debug))]
+pub struct ArchetypeStore {
+    inner: Vec<Archetype>,
+    // The Lookup: Sorted by Mask
+    lookup: Vec<(ComponentMask, ArchetypeId)>,
+}
+
+/// By not using a Vec directly, we can later change the storage strategy
+/// We also define only 2 mutating methods: push and index_mut
+impl Default for ArchetypeStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ArchetypeStore {
+    pub fn new() -> Self {
+        ArchetypeStore {
+            inner: Vec::new(),
+            lookup: Vec::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn push(&mut self, archetype: Archetype) {
+        let mask = archetype.component_mask;
+        let id = archetype.id;
+        self.inner.push(archetype);
+
+        // Keep lookup sorted
+        let idx = self
+            .lookup
+            .binary_search_by_key(&mask, |(m, _)| *m)
+            .unwrap_err();
+        self.lookup.insert(idx, (mask, id));
+    }
+
+    #[inline(always)]
+    pub fn with(
+        &mut self,
+        from: ArchetypeId,
+        with: &ComponentId,
+        registry: &ComponentRegistry,
+    ) -> ArchetypeId {
+        match self.inner[from.0].with(with) {
+            Some(id) => id,
+            None => {
+                let mut new_mask = self.inner[from.0].component_mask;
+                new_mask.set_id(with);
+                let id = self.get_or_create_archetype_search(new_mask, registry);
+                self.inner[from.0].set_with(with, id);
+                self.inner[id.0].set_without(with, from);
+                id
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn without(
+        &mut self,
+        from: ArchetypeId,
+        without: &ComponentId,
+        registry: &ComponentRegistry,
+    ) -> ArchetypeId {
+        match self.inner[from.0].without(without) {
+            Some(id) => id,
+            None => {
+                let mut new_mask = self.inner[from.0].component_mask;
+                new_mask.unset_id(without);
+                let id = self.get_or_create_archetype_search(new_mask, registry);
+                self.inner[from.0].set_without(without, id);
+                self.inner[id.0].set_with(without, from);
+                id
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn get_disjoint_archetypes(
+        &mut self,
+        idx1: usize,
+        idx2: usize,
+    ) -> (&mut Archetype, &mut Archetype) {
+        assert!(idx1 != idx2, "Indices must be different");
+
+        let (first, second) = if idx1 < idx2 {
+            let (left, right) = self.inner.split_at_mut(idx2);
+            (&mut left[idx1], &mut right[0])
+        } else {
+            let (left, right) = self.inner.split_at_mut(idx1);
+            (&mut right[0], &mut left[idx2])
+        };
+
+        (first, second)
+    }
+
+    pub fn get_or_create_archetype_search(
+        &mut self,
+        mask: ComponentMask,
+        registry: &ComponentRegistry,
+    ) -> ArchetypeId {
+        match self.get_id_search(&mask) {
+            Some(arch) => arch,
+            None => self.create_archetype(mask, registry),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn create_archetype(
+        &mut self,
+        component_mask: ComponentMask,
+        registry: &ComponentRegistry,
+    ) -> ArchetypeId {
+        let id = ArchetypeId(self.len());
+        let archetype = Archetype::new(id, component_mask, registry);
+        self.push(archetype);
+        id
+    }
+
+    pub fn get_or_create_archetype(
+        &mut self,
+        ids: &[ComponentId],
+        registry: &ComponentRegistry,
+    ) -> ArchetypeId {
+        let mut curr = self.get_or_create_empty(registry);
+
+        for id in ids.iter() {
+            curr = self.with(curr, id, registry);
+        }
+
+        curr
+    }
+
+    fn get_or_create_empty(&mut self, registry: &ComponentRegistry) -> ArchetypeId {
+        if self
+            .lookup
+            .first()
+            .is_none_or(|(mask, _)| mask != &ComponentMask::new())
+        {
+            self.create_archetype(ComponentMask::new(), registry)
+        } else {
+            self.lookup[0].1
+        }
+    }
+
+    #[inline(always)]
+    pub fn get_id_search(&self, mask: &ComponentMask) -> Option<ArchetypeId> {
+        // Binary search is extremely fast on small-medium datasets
+        self.lookup
+            .binary_search_by_key(mask, |(m, _)| *m)
+            .ok()
+            .map(|idx| self.lookup[idx].1)
+    }
+
+    /// Gets an iterator over archetypes added since the given ArchetypeId.
+    #[inline(always)]
+    pub fn since(&self, last_seen: ArchetypeId) -> impl Iterator<Item = &Archetype> {
+        self.inner.iter().skip(last_seen.0)
+    }
+}
+
+impl Deref for ArchetypeStore {
+    type Target = Vec<Archetype>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Index<ArchetypeId> for ArchetypeStore {
+    type Output = Archetype;
+
+    fn index(&self, index: ArchetypeId) -> &Self::Output {
+        self.inner.get(index.0).expect("ArchetypeId out of bounds")
+    }
+}
+
+impl IndexMut<ArchetypeId> for ArchetypeStore {
+    fn index_mut(&mut self, index: ArchetypeId) -> &mut Self::Output {
+        self.inner
+            .get_mut(index.0)
+            .expect("ArchetypeId out of bounds")
+    }
 }
 
 impl Archetype {
@@ -79,16 +266,16 @@ impl Archetype {
         }
 
         // 1. Move components
-        for column_id in &to_arch.component_ids.clone() {
+        for column_id in &to_arch.component_ids {
             if !self.component_mask.has_id(column_id) {
                 continue;
             }
 
-            let from_column = self
-                .column_mut(column_id)
+            let from_column = self.columns[column_id.0]
+                .as_mut()
                 .expect("Column should exist for component ID");
-            let to_column = to_arch
-                .column_mut(column_id)
+            let to_column = to_arch.columns[column_id.0]
+                .as_mut()
                 .expect("Column should exist for component ID");
 
             from_column.swap_remove_into(from_row, to_column);
@@ -141,9 +328,9 @@ impl Archetype {
         }
 
         // 1. Swap remove from columns
-        for column_id in self.component_mask.to_ids() {
+        for i in 0..self.component_ids.len() {
             let column = self
-                .column_mut(&column_id)
+                .column_mut(&self.component_ids[i].clone())
                 .expect("Column should exist for component ID");
 
             column.swap_remove(row);

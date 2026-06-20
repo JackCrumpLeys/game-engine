@@ -1252,7 +1252,6 @@ dependencies = [
  "glam",
  "image",
  "log",
- "rand",
  "spirv-builder",
  "vulkano",
  "vulkano-shaders",
@@ -1279,8 +1278,21 @@ dependencies = [
  "game_engine_utils",
  "log",
  "paste",
+ "rand",
  "rayon",
  "rustc-hash 2.1.1",
+ "smallvec 2.0.0-alpha.12",
+ "tracy-client",
+]
+
+[[package]]
+name = "game_engine_render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "game_engine_ecs",
+ "game_engine_shaders_types",
+ "log",
  "smallvec 2.0.0-alpha.12",
  "tracy-client",
 ]
@@ -1296,7 +1308,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "game_engine_shaders_bak"
+version = "0.1.0"
+dependencies = [
+ "game_engine_derive",
+ "game_engine_shaders_types",
+ "paste",
+ "spirv-std",
+]
+
+[[package]]
 name = "game_engine_shaders_types"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "game_engine_derive",
+ "spirv-std",
+]
+
+[[package]]
+name = "game_engine_shaders_types_bak"
 version = "0.1.0"
 dependencies = [
  "bytemuck",

@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use crate::{
     entity::{Entities, Entity},
     threading::FromWorldThread,
+    world::World,
 };
 
 const START_BATCH_SIZE: u32 = 16;
@@ -18,7 +19,7 @@ pub struct LocalThreadEntityAllocator {
 }
 
 impl FromWorldThread for LocalThreadEntityAllocator {
-    fn new_thread_local(_thread_id: usize, world: &crate::world::World) -> Self {
+    fn new_thread_local(_thread_id: usize, world: &World) -> Self {
         Self::new(world.entities.clone())
     }
 }
@@ -183,3 +184,7 @@ mod entity_allocator_tests {
         );
     }
 }
+use std::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicUsize, Ordering},
+};

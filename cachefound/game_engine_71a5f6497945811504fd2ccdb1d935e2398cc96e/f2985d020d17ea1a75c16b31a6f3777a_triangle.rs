@@ -1,0 +1,1 @@
+"(71a5f6497945811504fd2ccdb1d935e2398cc96e2]file:///home/jackc/Documents/code/rust/game_engine/crates/game_engine_shaders/src/triangle.rs:2file:///home/jackc/Documents/code/rust/game_engine

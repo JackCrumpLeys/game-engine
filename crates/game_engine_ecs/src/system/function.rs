@@ -1,6 +1,5 @@
 use crate::system::{System, SystemAccess, SystemParam, UnsafeWorldCell};
 use crate::world::World;
-use std::any::type_name;
 use std::marker::PhantomData;
 
 /// The structure that wraps a user function to make it a System.
@@ -48,14 +47,15 @@ where
         self.state = Some(Params::init_state(world, &mut self.access));
     }
 
-    unsafe fn run(&mut self, world: &UnsafeWorldCell) {
+    unsafe fn run<'s>(&'s mut self, world: &UnsafeWorldCell) {
+        #[cfg(feature = "tracy")]
         let _trace = tracy_client::Client::running()
             .expect("span! without a running Client")
             .span_alloc(None, self.name.as_str(), file!(), line!(), 10);
 
         let state = self.state.as_mut().expect("System not initialized");
         let item = unsafe { Params::get_param(state, world) };
-        self.func.run(item);
+        self.func.run::<'_, 's>(item);
     }
 
     fn update_access(&mut self, world: &World) -> bool {
@@ -105,7 +105,7 @@ where
 
 pub trait SystemParamFunction<Marker>: Send + Sync + 'static {
     type Param: SystemParam;
-    fn run<'w>(&mut self, item: <Self::Param as SystemParam>::Item<'w>);
+    fn run<'w, 's>(&mut self, item: <Self::Param as SystemParam>::Item<'w, 's>);
 }
 
 // Macro for tuples
@@ -114,14 +114,14 @@ macro_rules! impl_system_function {
         impl<Func, $($param),*> SystemParamFunction<fn($($param),*)> for Func
         where
             $($param: SystemParam + 'static),*,
-            Func: for<'a> FnMut($($param::Item<'a>),*) +
+            Func: for<'a, 's> FnMut($($param::Item<'a, 's>),*) +
                   // DISAMBIGUATION: Force P to be static by requiring the func to accept the static P
                   FnMut($($param),*) +
                   Send + Sync + 'static,
         {
             type Param = ($($param,)*);
 
-            fn run<'w>(&mut self, item: <Self::Param as SystemParam>::Item<'w>) {
+            fn run<'w, 's>(&mut self, item: <Self::Param as SystemParam>::Item<'w,'s>) {
                 #[allow(non_snake_case)]
                 let ($($param,)*) = item;
                 (self)($($param),*)

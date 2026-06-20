@@ -13,6 +13,7 @@ game_engine_derive.workspace = true
 log.workspace = true
 rayon.workspace = true
 paste.workspace = true
+rand.workspace = true
 game_engine_utils.workspace = true
 rustc-hash.workspace = true 
 tracy-client = { workspace=true }

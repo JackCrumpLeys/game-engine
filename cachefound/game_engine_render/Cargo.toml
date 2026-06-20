@@ -1,0 +1,16 @@
+[package]
+name = "game_engine_render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+game_engine_ecs.workspace = true
+game_engine_shaders_types.workspace = true
+bytemuck.workspace = true
+smallvec.workspace = true
+log.workspace = true
+tracy-client = { workspace = true, optional = true }
+
+[features]
+default = []
+tracy = ["tracy-client/enable"]

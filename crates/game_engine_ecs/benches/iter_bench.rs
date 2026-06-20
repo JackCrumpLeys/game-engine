@@ -203,7 +203,7 @@ fn cache_locality_soa_vs_aos(c: &mut Criterion) {
     // also has a 4KB MeshData component attached.
     // ECS should ignore the 4KB blob. AoS (Vec<(Pos, Mesh)>) has to load it into cache.
 
-    let count = 10_000;
+    let count = 100_000;
     let mut world = World::new();
 
     for i in 0..count {

@@ -3,20 +3,23 @@
 #![allow(clippy::too_many_arguments)]
 #![no_std]
 
-use game_engine_shaders_types::packet::{CIRCLE_SHAPE_INDEX, GpuCirclePacket, InstancePointer};
+use game_engine_shaders_types::packet::{
+    BEZIER_PATH_SHAPE_INDEX, CIRCLE_SHAPE_INDEX, CLIP_RECT_SHAPE_INDEX, GLYPH_SHAPE_INDEX,
+    GpuBezierPathPacket, GpuCirclePacket, GpuClipRectPacket, GpuEntityHead, GpuGlyphPacket,
+    GpuLineSegmentPacket, GpuLinearGradientPacket, GpuRadialGradientPacket, GpuRectPacket,
+    GpuRoundedRectPacket, GpuSpritePacket, GpuStrokePacket, InstancePointer,
+    LINEAR_GRADIENT_SHAPE_INDEX, LINESEGMENT_SHAPE_INDEX, RADIAL_GRADIENT_SHAPE_INDEX,
+    RECT_SHAPE_INDEX, ROUNDED_RECT_SHAPE_INDEX, SPRITE_SHAPE_INDEX, STROKE_SHAPE_INDEX,
+    TRIANGLE_SHAPE_INDEX,
+};
 use game_engine_shaders_types::{
     PushConstants, Vec2, Vec4,
-    packet::{GpuTrianglePacket, Interpolate, TRIANGLE_SHAPE_INDEX},
+    packet::{GpuTrianglePacket, Interpolate},
     vec2,
 };
 use paste::paste;
 use spirv_std::spirv;
 
-use crate::{render::Renderable, sdf::SdfShape};
-
-mod render;
-mod sdf;
-pub mod triangle;
 #[macro_use]
 mod macros;
 
@@ -27,45 +30,29 @@ fn fetch<T: Copy + Interpolate>(idx: u32, old: &[T], new: &[T], factor: f32) -> 
     a.interpolate(&b, factor)
 }
 
-// # Uber-Shader Renderer Entry Point
-//
-// This macro generates the `main_vs` (Vertex) and `main_fs` (Fragment) entry points
-// for a generic 2D SDF renderer. It utilizes a "Bindless-style" architecture via
-// descriptor indexing to support multiple shape types in a single draw call.
-//
-// ## Input Architecture
-//
-// The renderer expects data to be organized into two Descriptor Sets:
-//
-// **Descriptor Set 1: The Master Index**
-// *   **Binding 0 (`instance_map`):** A storage buffer of `InstancePointer` structs.
-//     *   Maps `gl_InstanceIndex` -> `(ShapeTypeID, LocalIndex)`.
-//     *   This allows the CPU to sort draw order (Z-index) without moving heavy shape data.
-//
-// **Descriptor Set 0: The Data Banks (Ping-Pong Buffers)**
-// *   Contains paired storage buffers (`old`, `new`) for *each* shape type defined in the macro.
-// *   **Bindings:** Defined explicitly in the macro call (e.g., Triangle Old: 0, Triangle New: 1).
-// *   **Interpolation:** The shader automatically interpolates between `old` and `new` based on
-//     `PushConstants::factor` to smooth out physics/logic ticks.
-//
-// ## Vertex Shader Logic
-// 1.  Reads `InstancePointer` using `gl_InstanceIndex`.
-// 2.  Fetches the specific shape packet (Triangle, Circle, etc.) using `LocalIndex`.
-// 3.  Calculates the AABB (Axis-Aligned Bounding Box) of the shape via `SdfShape::bounds()`.
-// 4.  Generates a Quad (2 triangles) covering that AABB on the fly (no vertex buffer required).
-//
-// ## Fragment Shader Logic
-// 1.  Receives the `InstancePointer` and interpolated `uv` coordinates from VS.
-// 2.  Refetches the shape packet.
-// 3.  Delegates to `Renderable::pixel_color()` to compute the final RGBA value.
-//
-// ## Push Constants
-// Expects a `PushConstants` struct.
+// Stack-based uber-shader.
+// Each shape type has its own ping-pong buffer pair.
+// The GPU iterates an entity's operation stack to resolve bounds (VS) and color (FS).
 define_renderer!(
-    // Shape ID Constant => Name     : Type              [OldBinding, NewBinding]
+    // shape_id => name : type [old_idx, new_idx]
     TRIANGLE_SHAPE_INDEX => triangle : GpuTrianglePacket [0, 1],
     CIRCLE_SHAPE_INDEX   => circle   : GpuCirclePacket   [2, 3],
-
+    // Render a colored stroke around shape stack
+    STROKE_SHAPE_INDEX   => stroke   : GpuStrokePacket   [4, 5],
+    // Render a rectangle with radius per corner
+    ROUNDED_RECT_SHAPE_INDEX => rounded_rect : GpuRoundedRectPacket [6, 7],
+    // Line from point A to B
+    LINESEGMENT_SHAPE_INDEX => line_seg  : GpuLineSegmentPacket [8, 9],
+    RECT_SHAPE_INDEX        => rect      : GpuRectPacket        [10, 11],
+    // this is a special layer overidding the color inside of the stack shader with a gradient
+    LINEAR_GRADIENT_SHAPE_INDEX => linear_grad : GpuLinearGradientPacket [12, 13],
+    RADIAL_GRADIENT_SHAPE_INDEX => radial_grad : GpuRadialGradientPacket [14, 15],
+    // Only render stack up until now within the clip rect
+    CLIP_RECT_SHAPE_INDEX   => clip_rect : GpuClipRectPacket    [16, 17],
+    // Sample color from a texture. Right now its a base shape as a equalateral square
+    // TODO:  Ideally this could just pervide pixel color to the stack later
+    SPRITE_SHAPE_INDEX      => sprite    : GpuSpritePacket      [18, 19],
+    // Analytic glyph: evaluates distance fields on the fly from flattened line segments
+    GLYPH_SHAPE_INDEX       => glyph      : GpuGlyphPacket        [20, 21],
+    BEZIER_PATH_SHAPE_INDEX => bezier_path : GpuBezierPathPacket [22, 23],
 );
-// BINDING CONSTANTS MUST MATCH THE VALUES USED IN THE MACRO CALL ABOVE!
-// I Could do this in build.rs but ehhh

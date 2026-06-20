@@ -1,24 +1,30 @@
+use std::sync::Arc;
 use std::time::Instant;
-
 
 use crate::render::storage::RenderPacket;
 
 /// A generic container for a specific primitive's data.
 /// This matches the SoA (Structure of Arrays) layout expected by the GPU.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct RenderPacketContents<T> {
     /// The "Database": Contains data for every allocated slot of this primitive type.
-    pub data: Vec<T>,
+    pub data: Arc<Vec<T>>,
     /// The "Indirection List": Contains indices of entities that are actually alive.
     pub active_indices: Vec<u32>,
     /// The indices that are new to this packet (not present in the previous one).
     pub newly_spawned_indices: Vec<u32>,
 }
 
-impl<T> RenderPacketContents<T> {
+impl<T: Clone> Default for RenderPacketContents<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Clone> RenderPacketContents<T> {
     pub fn new() -> Self {
         Self {
-            data: Vec::new(),
+            data: Arc::new(Vec::new()),
             active_indices: Vec::new(),
             newly_spawned_indices: Vec::new(),
         }
@@ -27,7 +33,7 @@ impl<T> RenderPacketContents<T> {
     pub fn new_all_data(data: Vec<T>, newly_spawned_indices: Vec<u32>) -> Self {
         let active_indices = (0..data.len() as u32).collect();
         Self {
-            data,
+            data: Arc::new(data),
             active_indices,
             newly_spawned_indices,
         }
@@ -38,7 +44,7 @@ impl<T> RenderPacketContents<T> {
         T: Clone,
     {
         Self {
-            data: self.data.clone(),
+            data: self.data.clone(), // O(1) Arc clone
             active_indices: self.active_indices.clone(),
             newly_spawned_indices: Vec::new(),
         }
@@ -46,7 +52,7 @@ impl<T> RenderPacketContents<T> {
 
     pub fn insert(&mut self, index: u32, data: T) {
         self.active_indices.push(index);
-        self.data.push(data);
+        Arc::make_mut(&mut self.data).push(data);
         self.newly_spawned_indices.push(index);
     }
 

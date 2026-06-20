@@ -213,7 +213,6 @@ mod entity_tests {
         assert!(!entities.is_alive(e1));
         assert!(entities.is_alive(e3));
     }
-    
 
     #[test]
     fn test_entity_bit_masking() {

@@ -117,12 +117,6 @@ impl Bundle for () {
 // Generate implementations for tuples using the auto macro
 auto_impl_all_tuples!(impl_recursive_bundle);
 
-// ==================================================================================
-// ManyRowBundle - This is harder to make recursive with the current constraints.
-// It's highly optimized for Vecs of concrete component tuples.
-// We will keep the old macro for this for now.
-// ==================================================================================
-
 // Macro to implement Bundle for tuples (A, B, C...)
 macro_rules! impl_many_row_bundle {
     ($($name:ident $num: tt),*) => {

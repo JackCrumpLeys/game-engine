@@ -15,7 +15,7 @@
 use game_engine_derive::Component;
 use game_engine_ecs::prelude::*;
 use game_engine_ecs::query::{Changed, Without};
-use game_engine_ecs::system::command::Command;
+use game_engine_ecs::system::command::Commands;
 use game_engine_ecs::system::{Local, System, UnsafeWorldCell};
 use std::ops::Deref;
 
@@ -52,7 +52,7 @@ struct GameStats {
 
 /// System: Uses Commands to spawn entities later (Deferred).
 /// Demonstrates: Commands, ResMut
-fn spawner_system(mut commands: Command, mut stats: ResMut<GameStats>) {
+fn spawner_system(mut commands: Commands, mut stats: ResMut<GameStats>) {
     if stats.frame_count == 0 {
         println!("[System: Spawner] First frame! Queueing spawn of Player via Commands...");
 
@@ -118,7 +118,7 @@ fn damage_system(
 
 /// System: Despawns dead entities.
 /// Demonstrates: Commands (Despawn)
-fn cleanup_system(mut commands: Command, query: Query<(Entity, &Health)>) {
+fn cleanup_system(mut commands: Commands, query: Query<(Entity, &Health)>) {
     for (e, health) in query.iter() {
         if health.0 <= 0.0 {
             println!("[System: Cleanup] Entity {e:?} died. Despawning.");

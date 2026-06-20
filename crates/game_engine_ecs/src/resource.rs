@@ -197,6 +197,91 @@ impl Default for Resources {
     }
 }
 
+// ============================================================================
+// Thread-Local Resources
+// A simpler map with no AtomicBorrow — safe because each thread owns its slot.
+// ============================================================================
+
+/// A resource map with no borrow checking — intended for exclusive per-thread use.
+/// Use `WorldThreadLocalStore<ThreadLocalResources>` to give each thread its own instance.
+pub struct ThreadLocalResources {
+    map: HashMap<TypeId, Box<dyn Any>, NoOpHash>,
+}
+
+impl ThreadLocalResources {
+    pub fn new() -> Self {
+        Self { map: HashMap::default() }
+    }
+
+    pub fn insert<R: 'static>(&mut self, resource: R) {
+        self.map.insert(TypeId::of::<R>(), Box::new(resource));
+    }
+
+    pub fn get<R: 'static>(&self) -> Option<&R> {
+        self.map.get(&TypeId::of::<R>())?.downcast_ref()
+    }
+
+    pub fn get_mut<R: 'static>(&mut self) -> Option<&mut R> {
+        self.map.get_mut(&TypeId::of::<R>())?.downcast_mut()
+    }
+
+    pub fn get_or_insert_default<R: 'static + Default>(&mut self) -> &mut R {
+        self.map
+            .entry(TypeId::of::<R>())
+            .or_insert_with(|| Box::new(R::default()))
+            .downcast_mut()
+            .unwrap()
+    }
+
+    pub fn contains<R: 'static>(&self) -> bool {
+        self.map.contains_key(&TypeId::of::<R>())
+    }
+}
+
+impl Default for ThreadLocalResources {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::threading::FromWorldThread for ThreadLocalResources {
+    fn new_thread_local(_thread_id: usize, _world: &crate::world::World) -> Self {
+        Self::new()
+    }
+}
+
+/// Immutable accessor for a thread-local resource.
+/// Obtained via `TLRes<T>` `SystemParam`.
+pub struct TLRes<'w, T: 'static> {
+    pub(crate) value: &'w T,
+}
+
+impl<'w, T: 'static> std::ops::Deref for TLRes<'w, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+/// Mutable accessor for a thread-local resource.
+/// Obtained via `TLResMut<T>` `SystemParam`.
+pub struct TLResMut<'w, T: 'static> {
+    pub(crate) value: &'w mut T,
+}
+
+impl<'w, T: 'static> std::ops::Deref for TLResMut<'w, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<'w, T: 'static> std::ops::DerefMut for TLResMut<'w, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.value
+    }
+}
+
 pub struct Res<'a, T: Resource> {
     value: &'a T,
     borrow: &'a AtomicBorrow,

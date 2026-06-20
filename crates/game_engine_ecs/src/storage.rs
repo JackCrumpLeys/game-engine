@@ -90,6 +90,7 @@ impl TypeErasedSequence {
     /// Appends an element
     /// # Safety
     /// The type T must match the Layout this TypeErasedSequence was created with.
+    #[inline(always)]
     pub unsafe fn push<T>(&mut self, value: T) {
         #[cfg(debug_assertions)]
         {
@@ -149,16 +150,19 @@ impl TypeErasedSequence {
         self.len += 1;
     }
 
+    #[inline(always)]
     pub fn layout(&self) -> Layout {
         self.layout
     }
 
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.len
     }
 
     /// Returns a pointer to the element at index.
     /// panics if index is out of bounds.
+    #[inline(always)]
     pub fn get_ptr(&self, index: usize) -> *mut u8 {
         if index >= self.len {
             panic!("Index out of bounds");
@@ -169,17 +173,20 @@ impl TypeErasedSequence {
     }
 
     /// Get element at idx
+    #[inline(always)]
     pub unsafe fn get_unsafe<T>(&self, index: usize) -> &T {
         unsafe { &*(self.ptr.as_ptr().add(index * self.layout.size()) as *const T) }
     }
 
     /// Get element at idx mutably
+    #[inline(always)]
     pub unsafe fn get_mut_unsafe<T>(&mut self, index: usize) -> &mut T {
         unsafe { &mut *(self.ptr.as_ptr().add(index * self.layout.size()) as *mut T) }
     }
 
     /// Removes the element at index by swapping it with the last element.
     /// panics if index is out of bounds.
+    #[inline(always)]
     pub fn swap_remove(&mut self, index: usize) {
         assert!(index < self.len);
 
@@ -208,6 +215,7 @@ impl TypeErasedSequence {
     /// Copy data before removing it into other
     /// Removes the element at index by swapping it with the last element.
     /// panics if index is out of bounds.
+    #[inline(always)]
     pub fn swap_remove_into(&mut self, index: usize, other: &mut TypeErasedSequence) {
         assert!(index < self.len);
         assert_eq!(self.layout.size(), other.layout.size());
@@ -236,6 +244,7 @@ impl TypeErasedSequence {
 
     /// Consumes `other`, moving its elements into `self`.
     /// `other` is automatically dropped at the end of this function, freeing its buffer.
+    #[inline(always)]
     pub fn append(&mut self, mut other: TypeErasedSequence) {
         // 1. Safety Checks
         assert_eq!(self.layout.size(), other.layout.size());
@@ -268,6 +277,7 @@ impl TypeErasedSequence {
     }
 
     // Fixed reserve logic from previous answer
+    #[inline(always)]
     pub fn reserve(&mut self, additional: usize) {
         if self.layout.size() == 0 {
             self.capacity = usize::MAX;
@@ -302,6 +312,7 @@ impl TypeErasedSequence {
         }
     }
 
+    #[inline(always)]
     fn grow(&mut self) {
         // If we have a zero-sized type, we don't need to allocate memory.
         if self.layout.size() == 0 {
@@ -317,6 +328,10 @@ impl TypeErasedSequence {
         };
 
         self.reserve(new_len - self.capacity);
+    }
+
+    fn get_ptr_unsafe(&self, index: usize) -> *mut u8 {
+        unsafe { self.ptr.as_ptr().add(index * self.layout.size()) }
     }
 }
 
@@ -357,6 +372,7 @@ impl Column {
         }
     }
 
+    #[inline(always)]
     pub fn borrow_state(&self) -> &AtomicBorrow {
         &self.borrow_state
     }
@@ -365,29 +381,35 @@ impl Column {
     /// # Safety
     /// The type T must match the Layout this column was created with.
     /// Appends an element at the given tick.
+    #[inline(always)]
     pub unsafe fn push<T>(&mut self, value: T) {
         unsafe { self.inner.push(value) };
         self.mutated_ticks.push(self.tick);
     }
 
+    #[inline(always)]
     pub fn inner(&self) -> &TypeErasedSequence {
         &self.inner
     }
 
+    #[inline(always)]
     pub fn inner_mut(&mut self) -> &mut TypeErasedSequence {
         &mut self.inner
     }
 
+    #[inline(always)]
     pub fn push_ticks(&mut self, n: usize) {
         self.mutated_ticks.extend(vec![self.tick; n])
     }
 
+    #[inline(always)]
     pub fn layout(&self) -> Layout {
         self.inner.layout
     }
 
     /// Appends another sequence to this column and updates the change detection ticks.
     /// Consumes the other sequence.
+    #[inline(always)]
     pub fn append(&mut self, other: TypeErasedSequence) {
         let count = other.len();
 
@@ -401,31 +423,44 @@ impl Column {
         self.push_ticks(count);
     }
 
+    #[inline(always)]
     pub fn set_tick(&mut self, tick: impl Into<ChangeTick>) {
         self.tick = tick.into();
     }
 
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.inner.len
     }
 
     /// Get a pointer to the mutated ticks array.
+    #[inline(always)]
     pub fn get_ticks_ptr(&mut self) -> *mut ChangeTick {
         self.mutated_ticks.as_mut_ptr()
     }
 
     /// Returns a pointer to the element at index.
     /// panics if index is out of bounds.
+    #[inline(always)]
     pub fn get_ptr(&self, index: usize) -> *mut u8 {
         self.inner.get_ptr(index)
     }
 
+    /// Returns a pointer to the element at index.
+    /// panics if index is out of bounds.
+    #[inline(always)]
+    pub unsafe fn get_ptr_unsafe(&self, index: usize) -> *mut u8 {
+        unsafe { self.inner.get_ptr_unsafe(index) }
+    }
+
     /// Get element at idx
+    #[inline(always)]
     pub unsafe fn get_unsafe<T>(&self, index: usize) -> &T {
         unsafe { self.inner.get_unsafe(index) }
     }
 
     /// Get element at idx mutably
+    #[inline(always)]
     pub unsafe fn get_mut_unsafe<T>(&mut self, index: usize) -> &mut T {
         unsafe { self.inner.get_mut_unsafe(index) }
     }
@@ -433,6 +468,7 @@ impl Column {
     /// Removes the element at index by swapping it with the last element.
     /// Returns true if an element was actually moved (i.e. we didn't remove the very last one).
     /// panics if index is out of bounds.
+    #[inline(always)]
     pub fn swap_remove(&mut self, index: usize) {
         debug_assert!(self.len() == self.mutated_ticks.len());
 
@@ -443,6 +479,7 @@ impl Column {
     /// Copy data before removing it into other
     /// Removes the element at index by swapping it with the last element.
     /// panics if index is out of bounds.
+    #[inline(always)]
     pub fn swap_remove_into(&mut self, index: usize, other: &mut Column) {
         debug_assert!(self.len() == self.mutated_ticks.len());
         debug_assert!(self.inner.layout.size() == other.inner.layout.size());
@@ -454,13 +491,17 @@ impl Column {
             .push(self.mutated_ticks.swap_remove(index));
     }
 
+    #[inline(always)]
     pub fn changed_ticks(&self) -> &Vec<ChangeTick> {
         &self.mutated_ticks
     }
+
+    #[inline(always)]
     pub fn changed_ticks_mut(&mut self) -> &mut Vec<ChangeTick> {
         &mut self.mutated_ticks
     }
 
+    #[inline(always)]
     pub fn reserve(&mut self, additional: usize) {
         self.inner.reserve(additional);
         self.mutated_ticks.reserve(additional);

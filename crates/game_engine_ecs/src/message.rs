@@ -222,7 +222,7 @@ impl<'a, T: Message> MessageWriter<'a, T> {
 
 impl<T: Message> SystemParam for MessageWriter<'_, T> {
     type State = <ResMut<'static, MessageQueue<T>> as SystemParam>::State;
-    type Item<'w> = MessageWriter<'w, T>;
+    type Item<'w, 's> = MessageWriter<'w, T>;
 
     fn init_state(world: &mut World, access: &mut SystemAccess) -> Self::State {
         access.write_resource::<T>();
@@ -231,10 +231,10 @@ impl<T: Message> SystemParam for MessageWriter<'_, T> {
         ResMut::<MessageQueue<T>>::init_state(world, access)
     }
 
-    unsafe fn get_param<'w>(
+    unsafe fn get_param<'w, 's>(
         state: &'w mut Self::State,
         u_world: &'w UnsafeWorldCell<'w>,
-    ) -> Self::Item<'w> {
+    ) -> Self::Item<'w, 's> {
         MessageWriter {
             queue: unsafe { ResMut::<MessageQueue<T>>::get_param(state, u_world) },
         }
@@ -246,7 +246,7 @@ impl<T: Message> SystemParam for MessageReader<'_, T> {
         MessageId<T>,
         <Res<'static, MessageQueue<T>> as SystemParam>::State,
     );
-    type Item<'w> = MessageReader<'w, T>;
+    type Item<'w, 's> = MessageReader<'w, T>;
 
     fn init_state(world: &mut World, access: &mut SystemAccess) -> Self::State {
         access.read_resource::<T>();
@@ -259,10 +259,10 @@ impl<T: Message> SystemParam for MessageReader<'_, T> {
         )
     }
 
-    unsafe fn get_param<'w>(
+    unsafe fn get_param<'w, 's>(
         state: &'w mut Self::State,
         u_world: &'w UnsafeWorldCell<'w>,
-    ) -> Self::Item<'w> {
+    ) -> Self::Item<'w, 's> {
         let (read_from, res_state) = state;
 
         let queue = unsafe { Res::<MessageQueue<T>>::get_param(res_state, u_world) };

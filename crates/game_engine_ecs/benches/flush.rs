@@ -27,8 +27,8 @@ fn bench_my_engine(c: &mut Criterion) {
     }
     world.flush();
 
-    fn my_system(query: Query<&Pos>) {
-        black_box(query);
+    fn my_system(query: Query<&Pos>, num: Local<i32>) {
+        black_box(*num + 1);
     }
 
     let mut sys = my_system.into_system();
@@ -38,7 +38,7 @@ fn bench_my_engine(c: &mut Criterion) {
     c.bench_function("my_engine_system_overhead_10k", |b| {
         b.iter(|| {
             let result = unsafe { sys.run(&cell) };
-            black_box(result);
+            black_box(&cell);
         })
     });
 

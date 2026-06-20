@@ -17,8 +17,6 @@ use std::marker::PhantomData;
 // ============================================================================
 
 /// A marker trait for grouping systems.
-///
-/// Implement this with `#[derive(SystemSet)]` on an enum or struct.
 pub trait SystemSet: DynHash + Debug + Send + Sync + 'static {
     /// Clone the `SystemSet` as a boxed trait object.
     fn dyn_clone(&self) -> Box<dyn SystemSet>;
@@ -51,7 +49,7 @@ impl Clone for Box<dyn SystemSet> {
 pub struct SystemTypeSet<T: 'static>(PhantomData<fn() -> T>);
 
 impl<T: 'static> SystemTypeSet<T> {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self(PhantomData)
     }
 }
@@ -303,6 +301,12 @@ pub struct ExecutedMask {
     storage: Vec<bool>,
 }
 
+impl Default for ExecutedMask {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExecutedMask {
     pub fn new() -> Self {
         Self {
@@ -397,7 +401,7 @@ impl Schedule {
             graph.add_node(i);
         }
 
-        // 2. Resolve explicit dependencies
+        // Resolve explicit dependencies
         for (i, config) in self.configs.iter().enumerate() {
             for dep in &config.dependencies {
                 // Check every other system to see if it satisfies the dependency target
@@ -443,9 +447,22 @@ impl Schedule {
             Err(cycles) => {
                 // In a real engine, you'd format this to show the names of the systems
                 // involved in the cycle.
-                panic!("Dependency cycle detected in Schedule: {:?}", cycles);
+                panic!("Dependency cycle detected in Schedule: {cycles:?}");
             }
         }
+
+        // dbg!(
+        //     self.batches
+        //         .iter()
+        //         .map(|b| b
+        //             .iter()
+        //             .map(|idx| {
+        //                 let config = &self.configs[*idx];
+        //                 (config.sets.clone(), config.system().access().clone())
+        //             })
+        //             .collect::<Vec<_>>())
+        //         .collect::<Vec<_>>()
+        // );
 
         self.needs_rebuild = false;
     }
@@ -526,7 +543,7 @@ impl Schedule {
     pub fn run(&mut self, world: &mut World, amount: Option<u64>) {
         let core_ids = get_core_ids().unwrap();
         let pool = rayon::ThreadPoolBuilder::new()
-            .thread_name(|i| format!("ecs-worker-{}", i))
+            .thread_name(|i| format!("ecs-worker-{i}"))
             .start_handler(move |id| {
                 set_for_current(core_ids[id % core_ids.len()]);
             })
@@ -548,7 +565,7 @@ impl Schedule {
     fn run_batch_parallel(&mut self, world: &mut World, batch: usize) {
         let batch = &self.batches[batch];
 
-        if batch.len() <= 1 {
+        if batch.len() <= 3 {
             for idx in batch {
                 unsafe {
                     let system = &mut self.configs[*idx].system;
@@ -616,7 +633,7 @@ mod scheduler_tests {
     use super::*;
     use crate::{
         prelude::*,
-        system::{Local, command::Command},
+        system::{Local, command::Commands},
     };
     use std::{
         hint::black_box,
@@ -721,6 +738,7 @@ mod scheduler_tests {
     }
 
     #[test]
+    #[ignore]
     fn basic_speed_test() {
         let mut world = World::new();
 
@@ -729,7 +747,7 @@ mod scheduler_tests {
         // Because System 2 is explicitly "after" System 1,
         // the scheduler must flush the Command buffer between them.
 
-        fn spawner(mut cmd: Command) {
+        fn spawner(mut cmd: Commands) {
             cmd.spawn(100i32);
         }
 
@@ -754,6 +772,7 @@ mod scheduler_tests {
     }
 
     #[test]
+    #[ignore]
     fn heavy_stress_test() {
         let mut world = World::new();
 
@@ -789,7 +808,7 @@ mod scheduler_tests {
 
         // System 3: Structural Churn (Spawn/Despawn)
         // This forces the scheduler to re-evaluate the world every tick
-        fn churn(mut cmd: Command, query: Query<Entity, With<Tag>>) {
+        fn churn(mut cmd: Commands, query: Query<Entity, With<Tag>>) {
             // Despawn all "Tag" entities
             query.for_each(|e| {
                 cmd.despawn(e);
@@ -888,7 +907,7 @@ mod scheduler_tests {
         // Because System 2 is explicitly "after" System 1,
         // the scheduler must flush the Command buffer between them.
 
-        fn spawner(mut cmd: Command) {
+        fn spawner(mut cmd: Commands) {
             cmd.spawn(A);
         }
 

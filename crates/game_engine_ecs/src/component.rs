@@ -2,6 +2,8 @@ use std::alloc::Layout;
 use std::fmt::{self, Debug};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use smallvec::SmallVec;
+
 pub const MAX_COMPONENTS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -64,8 +66,8 @@ impl ComponentMask {
     }
 
     #[inline]
-    pub fn to_ids(&self) -> Vec<ComponentId> {
-        let mut ids = Vec::with_capacity(8); // Small optimization
+    pub fn to_ids(&self) -> SmallVec<ComponentId, MAX_COMPONENTS> {
+        let mut ids = SmallVec::new(); // Small optimization
         for index in 0..Self::CAPACITY {
             if self.has(index) {
                 ids.push(ComponentId(index));
@@ -132,9 +134,11 @@ impl ComponentMask {
     #[inline]
     // Returns true if changed false if no change
     pub fn union(&mut self, other: &Self) -> bool {
-        let changed = self != other;
+        let mut changed = false;
         for i in 0..Self::WORD_COUNT {
+            let old = self.bits[i];
             self.bits[i] |= other.bits[i];
+            changed |= self.bits[i] != old;
         }
         changed
     }

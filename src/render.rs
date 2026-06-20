@@ -1,14 +1,20 @@
 //! render module:
 //! Makes the window, initializes Vulkan, manages swapchain, and contains the render world ECS.
+
 pub mod components;
 pub mod packet;
-mod pass;
+pub mod pass;
+pub mod plugin;
 mod shaders;
+pub mod stack;
 pub mod storage;
+pub mod texture;
 
 use std::sync::Arc;
 
+use crossbeam_channel::{Receiver, Sender};
 use game_engine_ecs::world::World;
+use crate::input::{InputAccumulator, InputState};
 use glam::Vec2;
 use vulkano::{
     VulkanLibrary,
@@ -22,48 +28,57 @@ use vulkano::{
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
     swapchain::{PresentMode, Surface, Swapchain, SwapchainCreateInfo},
 };
+
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::ActiveEventLoop,
-    platform::x11::WindowAttributesExtX11,
     window::{Window, WindowId},
 };
 
 use crate::{
     GameEngineResult,
-    render::{packet::SnapshotPair, pass::PassManager, storage::RenderPacket},
+    render::{
+        pass::PassManager,
+        storage::RenderPacket,
+    },
 };
 
+
+use crate::FrameData;
+
 pub struct RenderManager {
-    render_world: World,
-    render_ctx: Option<RenderContext>,
-    snapshot_pair: Option<SnapshotPair>,
+    // Dummy world just for PassManager's thread-local allocators
+    pub render_world: World,
+    pub render_ctx: Option<RenderContext>,
+
+    // Channel from ECS sim thread
+    pub rx: Receiver<FrameData>,
+    // Channel to send input state to ECS sim thread
+    pub input_tx: Sender<InputState>,
+    pub packet: RenderPacket,
 
     pub camera_pos: Vec2,
     pub zoom: f32,
-    mouse_pressed: bool,
-    last_mouse_pos: Vec2,
+    /// Textures buffered while render_ctx wasn't ready yet.
+    buffered_textures: Vec<texture::PendingTexture>,
+    pub accum_render_time: std::time::Duration,
+    input_accumulator: InputAccumulator,
+    pub window_title: String,
 }
 
 #[allow(dead_code)] // TODO: Remove when more fields are used
-struct RenderContext {
-    pass_manager: PassManager,
-    instance: Arc<Instance>,
-    physical_device: Arc<PhysicalDevice>,
-    surface: Arc<Surface>,
-    window: Arc<Window>,
-    device: Arc<Device>,
-    render_queue: Arc<Queue>,
-    transfer_queue: Arc<Queue>,
-    swapchain: Arc<Swapchain>,
-    swapchain_images: Vec<Arc<Image>>,
-}
-
-impl Default for RenderManager {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct RenderContext {
+    pub pass_manager: PassManager,
+    pub instance: Arc<Instance>,
+    pub physical_device: Arc<PhysicalDevice>,
+    pub surface: Arc<Surface>,
+    pub window: Arc<Window>,
+    pub device: Arc<Device>,
+    pub render_queue: Arc<Queue>,
+    pub transfer_queue: Arc<Queue>,
+    pub swapchain: Arc<Swapchain>,
+    pub swapchain_images: Vec<Arc<Image>>,
 }
 
 impl RenderManager {
@@ -96,35 +111,26 @@ impl RenderManager {
         rcx.swapchain_images = new_images;
     }
 
-    pub fn new() -> Self {
+    pub fn new(rx: Receiver<FrameData>, input_tx: Sender<InputState>) -> Self {
+        let mut render_world = World::new();
+        render_world.resources_mut().insert(RenderPacket::new());
         Self {
-            render_world: World::new(),
+            render_world,
             render_ctx: None,
-            snapshot_pair: None,
+            buffered_textures: Vec::new(),
+            rx,
+            input_tx,
             camera_pos: glam::Vec2::ZERO,
             zoom: 1.0,
-            mouse_pressed: false,
-            last_mouse_pos: glam::Vec2::ZERO,
+            accum_render_time: std::time::Duration::ZERO,
+            input_accumulator: InputAccumulator::new(),
+            packet: RenderPacket::new(),
+            window_title: "Game Engine".into(),
         }
     }
 
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.render_world
-    }
-
-    pub fn push_snapshot(&mut self, snapshot: RenderPacket) {
-        match self.snapshot_pair {
-            Some(ref mut pair) => {
-                pair.push_new(snapshot.snapped_at);
-                if let Some(rctx) = &mut self.render_ctx {
-                    rctx.pass_manager.push_packet(snapshot);
-                }
-            }
-            None => {
-                self.snapshot_pair =
-                    Some(SnapshotPair::new(snapshot.snapped_at, snapshot.snapped_at));
-            }
-        }
     }
 }
 
@@ -135,24 +141,47 @@ impl ApplicationHandler for RenderManager {
         // --- Instance Creation ---
         let library = VulkanLibrary::new().expect("no local Vulkan library/DLL");
         log::debug!("Vulkan api ver = {}", library.api_version());
+        let mut enable_validation = false;
+        if let Ok(prop) = library.layer_properties() {
+            for layer in prop {
+                if layer.name() == "VK_LAYER_KHRONOS_validation" {
+                    enable_validation = true;
+                    break;
+                }
+            }
+        }
+
+        let mut enabled_layers = vec![];
+        if enable_validation {
+            enabled_layers.push("VK_LAYER_KHRONOS_validation".to_owned());
+        }
+
         let instance = Instance::new(
             library,
             InstanceCreateInfo {
                 flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
+                enabled_layers,
                 enabled_extensions: Surface::required_extensions(event_loop).unwrap(),
                 ..Default::default()
             },
         )
         .expect("failed to create instance");
 
+
+
         // --- Window Creation ---
+        let mut attributes = Window::default_attributes()
+            .with_title(&self.window_title);
+
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attributes = WindowAttributesExtWayland::with_name(attributes, "rust-bg-class", "rust-bg-class");
+        }
+
         let window = Arc::new(
             event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("my-rust-bg")
-                        .with_name("rust-bg-class", "rust-bg-class"),
-                )
+                .create_window(attributes)
                 .unwrap(),
         );
 
@@ -222,6 +251,11 @@ impl ApplicationHandler for RenderManager {
                 },
                 enabled_features: DeviceFeatures {
                     vulkan_memory_model: true,
+                    descriptor_indexing: true,
+                    shader_sampled_image_array_non_uniform_indexing: true,
+                    runtime_descriptor_array: true,
+                    descriptor_binding_variable_descriptor_count: true,
+                    descriptor_binding_partially_bound: true,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -249,12 +283,7 @@ impl ApplicationHandler for RenderManager {
             })
             .0;
 
-        let present_mode = physical_device
-            .surface_present_modes(&surface, Default::default())
-            .expect("Failed to get present modes")
-            .into_iter()
-            .find(|&mode| mode == PresentMode::Fifo)
-            .unwrap_or(PresentMode::Fifo);
+        let present_mode = PresentMode::Fifo;
 
         log::info!("Selected image format: {image_format:?}, present mode: {present_mode:?}");
 
@@ -280,8 +309,14 @@ impl ApplicationHandler for RenderManager {
 
         log::info!("Swapchain created with {} images", images.len());
 
-        let pass_manager =
-            PassManager::new(device.clone(), swapchain.clone(), &images, window.clone()).unwrap();
+        let pass_manager = PassManager::new(
+            device.clone(),
+            swapchain.clone(),
+            &images,
+            window.clone(),
+            &mut self.render_world,
+        )
+        .unwrap();
 
         let rcx = RenderContext {
             pass_manager,
@@ -305,73 +340,56 @@ impl ApplicationHandler for RenderManager {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Feed all events through the input accumulator
+        self.input_accumulator.process_event(&event);
+
         match event {
-            // TODO: Proper key recording and shi
+            // Camera controls (built-in pan/zoom via mouse)
             WindowEvent::MouseWheel { delta, .. } => {
                 let amount = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                     winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.y / 100.0) as f32,
                 };
-                // Exponential zoom feels more natural
                 self.zoom *= 1.0 + (amount * 0.1);
-                // self.zoom = self.zoom.clamp(0.01, 100.0);
-            }
-
-            WindowEvent::MouseInput { state, button, .. } => {
-                if button == winit::event::MouseButton::Left {
-                    self.mouse_pressed = state.is_pressed();
-                }
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                let pos = glam::vec2(position.x as f32, -position.y as f32);
-                if self.mouse_pressed {
-                    let delta = pos - self.last_mouse_pos;
-                    // We divide by zoom so panning speed matches world movement
-                    self.camera_pos -= delta / self.zoom;
-                }
-                self.last_mouse_pos = pos;
             }
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_) | WindowEvent::Focused(_) => {
-                // Recreate swapchain when window is resized or focus changes
                 self.recreate_swapchain();
             }
             WindowEvent::RedrawRequested => {
-                log::trace!("--- FRAME START ---");
-                match &mut self.render_ctx {
-                    Some(rcx) => {
-                        // Handle rendering here
-                        if self.snapshot_pair.is_some() {
-                            // Finally do pass
-                            match rcx.pass_manager.do_pass(
-                                rcx.swapchain.clone(),
-                                rcx.render_queue.clone(),
-                                rcx.transfer_queue.clone(),
-                                self.camera_pos,
-                                self.zoom,
-                            ) {
-                                Ok(r) => match r {
-                                    pass::PassResult::Success => {
-                                        log::trace!("Frame rendered successfully")
-                                    }
-                                    pass::PassResult::SwapchainOutOfDate => {
-                                        log::warn!(
-                                            "Swapchain out of date during rendering, recreating..."
-                                        );
-                                        self.recreate_swapchain();
-                                    }
-                                },
-                                Err(e) => log::error!("Rendering error: {e:?}"),
-                            }
-                        } else {
-                            log::warn!("No snapshot pair available for rendering");
-                        }
-                    }
-                    None => {
-                        log::warn!("Render context not initialized");
-                    }
+                // Send input snapshot to ECS thread
+                let snapshot = self.input_accumulator.take_snapshot();
+
+                // Built-in camera pan via mouse drag
+                if snapshot.mouse_button_held(winit::event::MouseButton::Left) {
+                    let delta = glam::vec2(snapshot.mouse_delta.x, -snapshot.mouse_delta.y);
+                    self.camera_pos -= delta / self.zoom;
                 }
-                log::trace!("--- FRAME END ---");
+
+                let _ = self.input_tx.try_send(snapshot);
+
+                if let Some(rctx) = &mut self.render_ctx {
+                    
+                    // 1. Drain ALL pending frames and merge them safely!
+                    while let Ok(frame) = self.rx.try_recv() {
+                        rctx.pass_manager.push_packet_dirty(frame.delta, frame.dirty);
+                    }
+
+                    // 2. Draw using the completely merged state
+                    let _ = rctx.pass_manager.do_pass(
+                        &self.render_world,
+                        rctx.swapchain.clone(),
+                        rctx.render_queue.clone(),
+                        rctx.transfer_queue.clone(),
+                        self.camera_pos,
+                        self.zoom,
+                    );
+                }
+
+                // Ask Winit to instantly redraw again (Uncapped FPS)
+                if let Some(rcx) = &self.render_ctx {
+                    rcx.window.request_redraw();
+                }
             }
             _ => (),
         }

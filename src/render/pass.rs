@@ -1,6 +1,3 @@
-use game_engine_shaders_types::packet::{
-    CIRCLE_SHAPE_INDEX, InstancePointer, TRIANGLE_SHAPE_INDEX,
-};
 use std::sync::Arc;
 use std::time::Instant;
 use vulkano::buffer::BufferUsage;
@@ -20,24 +17,68 @@ use vulkano::pipeline::graphics::color_blend::{
 use vulkano::pipeline::graphics::viewport::Viewport;
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass};
+use vulkano::shader::ShaderStages;
 use vulkano::swapchain::{Swapchain, SwapchainPresentInfo, acquire_next_image};
 use vulkano::sync::{self, GpuFuture};
 use vulkano::{Validated, VulkanError, single_pass_renderpass};
 use winit::window::Window;
 
+#[derive(Default, Debug)]
+pub struct PassProfiler {
+    pub frames: u32,
+    pub cleanup: std::time::Duration,
+    pub acquire: std::time::Duration,
+    pub cmd_alloc: std::time::Duration,
+    pub upload: std::time::Duration,
+    pub desc_sets: std::time::Duration,
+    pub record_draw: std::time::Duration,
+    pub build_cmd: std::time::Duration,
+    pub submit: std::time::Duration,
+    pub total: std::time::Duration,
+}
+
+use game_engine_ecs::threading::FromWorldThread;
+use game_engine_ecs::world::World;
+
 use crate::GameEngineResult;
 use crate::render::packet::SnapshotPair;
 use crate::render::shaders;
-use crate::render::storage::{RenderPacket, RenderSystem};
+use crate::render::storage::{RenderDelta, RenderPacket, RenderSystem};
 use game_engine_shaders_types::{PushConstants, create_camera_matrix};
 
+struct ThreadLocalAllocators {
+    staging_allocator: SubbufferAllocator,
+}
+
+impl FromWorldThread for ThreadLocalAllocators {
+    fn new_thread_local(_thread_id: usize, world: &World) -> Self {
+        let memory_allocator = world
+            .resources()
+            .get::<Arc<StandardMemoryAllocator>>()
+            .unwrap()
+            .clone();
+
+        Self {
+            staging_allocator: SubbufferAllocator::new(
+                memory_allocator,
+                SubbufferAllocatorCreateInfo {
+                    buffer_usage: BufferUsage::TRANSFER_SRC,
+                    memory_type_filter: MemoryTypeFilter::PREFER_HOST,
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+}
+
 pub struct PassManager {
-    // REFACTOR: The RenderSystem now manages all GPU data channels.
     system: RenderSystem,
-    // REFACTOR: The GraphicsPipeline is now a single, shared resource.
     pipeline: Arc<GraphicsPipeline>,
 
-    new_packet: RenderPacket,
+    new_delta: RenderDelta,
+    dirty_per_channel: Option<Vec<Vec<u32>>>,
+
+    needs_upload: bool,
 
     snapshots: SnapshotPair,
     pub(crate) render_pass: Arc<RenderPass>,
@@ -45,10 +86,10 @@ pub struct PassManager {
     pub(crate) command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     pub(crate) descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     pub(crate) memory_allocator: Arc<StandardMemoryAllocator>,
-    pub(crate) storage_allocator: SubbufferAllocator,
-    previous_frame_end: Option<Box<dyn GpuFuture>>,
+    last_frame_fence: Option<vulkano::sync::future::FenceSignalFuture<Box<dyn GpuFuture>>>,
     viewport: Viewport,
     start_time: Instant,
+    pub profiler: PassProfiler,
 }
 
 impl PassManager {
@@ -57,6 +98,7 @@ impl PassManager {
         swapchain: Arc<Swapchain>,
         images: &[Arc<Image>],
         window: Arc<Window>,
+        world: &mut World,
     ) -> GameEngineResult<Self> {
         let render_pass = single_pass_renderpass!(
             device.clone(),
@@ -77,12 +119,29 @@ impl PassManager {
                 vulkano::pipeline::PipelineShaderStageCreateInfo::new(vs),
                 vulkano::pipeline::PipelineShaderStageCreateInfo::new(fs),
             ];
-            let layout = vulkano::pipeline::PipelineLayout::new(
-                device.clone(),
+            let mut layout_create_infos =
                 vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo::from_stages(
                     &stages,
-                )
-                .into_pipeline_layout_create_info(device.clone())?,
+                );
+
+            if let Some(set0) = layout_create_infos.set_layouts.get_mut(0) {
+                for binding in set0.bindings.values_mut() {
+                    binding.stages |= ShaderStages::VERTEX;
+                }
+            }
+
+            if let Some(set2) = layout_create_infos.set_layouts.get_mut(2)
+                && let Some(binding1) = set2.bindings.get_mut(&1)
+            {
+                binding1.descriptor_count = 1024;
+                binding1.binding_flags |=
+                    vulkano::descriptor_set::layout::DescriptorBindingFlags::PARTIALLY_BOUND;
+                binding1.binding_flags |= vulkano::descriptor_set::layout::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT;
+            }
+
+            let layout = vulkano::pipeline::PipelineLayout::new(
+                device.clone(),
+                layout_create_infos.into_pipeline_layout_create_info(device.clone())?,
             )?;
 
             GraphicsPipeline::new(
@@ -120,20 +179,19 @@ impl PassManager {
         };
 
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
-        let storage_allocator = SubbufferAllocator::new(
-            memory_allocator.clone(),
-            SubbufferAllocatorCreateInfo {
-                buffer_usage: BufferUsage::STORAGE_BUFFER | BufferUsage::TRANSFER_SRC,
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-        );
+
+        // Add shared resources for thread-local creation
+        world.resources_mut().insert(device.clone());
+        world.resources_mut().insert(memory_allocator.clone());
+        world
+            .thread_local_res_mut()
+            .insert(ThreadLocalAllocators::new_thread_local(0, world));
 
         Ok(Self {
-            system: RenderSystem::new(memory_allocator.clone()), // REFACTOR
+            system: RenderSystem::new(memory_allocator.clone()),
             pipeline,
-            new_packet: RenderPacket::new(),
+            new_delta: RenderDelta::default(),
+            dirty_per_channel: None,
             snapshots: SnapshotPair::new_empty(),
             render_pass,
             framebuffers,
@@ -146,111 +204,190 @@ impl PassManager {
                 Default::default(),
             )),
             memory_allocator,
-            storage_allocator,
-            previous_frame_end: Some(sync::now(device).boxed()),
+            last_frame_fence: None,
             viewport: Viewport {
                 offset: [0.0, 0.0],
                 extent: window.inner_size().into(),
                 depth_range: 0.0..=1.0,
             },
             start_time: Instant::now(),
+            needs_upload: true,
+            profiler: PassProfiler::default(),
         })
     }
 
-    pub fn push_packet(&mut self, packet: RenderPacket) {
-        self.snapshots.push_new(packet.snapped_at);
-        self.new_packet = packet;
-        self.system.mark_all_dirty();
+    pub fn push_packet(&mut self, mut delta: RenderDelta) {
+        if self.needs_upload {
+            self.snapshots.new = delta.snapped_at;
+            delta.merge_previous(std::mem::take(&mut self.new_delta));
+            self.new_delta = delta;
+            self.dirty_per_channel = None;
+        } else {
+            self.snapshots.push_new(delta.snapped_at);
+            self.new_delta = delta;
+            self.dirty_per_channel = None;
+            self.needs_upload = true;
+        }
+    }
+
+    /// Push a packet with per-channel dirty slot lists.
+    /// Only the listed slots in each channel will be uploaded.
+    pub fn push_packet_dirty(&mut self, mut delta: RenderDelta, dirty: Vec<Vec<u32>>) {
+        if self.needs_upload {
+            self.snapshots.new = delta.snapped_at;
+            delta.merge_previous(std::mem::take(&mut self.new_delta));
+            self.new_delta = delta;
+
+            if let Some(existing_dirty) = &mut self.dirty_per_channel {
+                for (i, slots) in dirty.into_iter().enumerate() {
+                    existing_dirty[i].extend(slots);
+                    existing_dirty[i].sort_unstable();
+                    existing_dirty[i].dedup();
+                }
+            } else {
+                self.dirty_per_channel = Some(dirty);
+            }
+        } else {
+            self.snapshots.push_new(delta.snapped_at);
+            self.new_delta = delta;
+            self.dirty_per_channel = Some(dirty);
+            self.needs_upload = true;
+        }
     }
 
     pub fn do_pass(
         &mut self,
+        world: &World,
         swapchain: Arc<Swapchain>,
         queue: Arc<Queue>,
-        _transfer_queue: Arc<Queue>, // Removing this for now to solve the lock issue
+        _transfer_queue: Arc<Queue>,
         camera_pos: glam::Vec2,
         zoom: f32,
     ) -> GameEngineResult<PassResult> {
-        // Reset the future timeline
-        self.previous_frame_end = Some(sync::now(queue.device().clone()).boxed());
-        // --- 0. CLEANUP ---
-        if let Some(future) = self.previous_frame_end.as_mut() {
-            future.cleanup_finished();
-        }
+        #[cfg(feature = "tracy")]
+        let _pass_span = tracy_client::span!("do_pass");
 
+        log::trace!("do_pass frame start");
+        log::trace!("do_pass start");
+        let start_total = Instant::now();
+        let mut t = Instant::now();
+
+        // --- 0. SYNC: one frame in flight. Block render thread until prior frame's
+        // GPU work is fully complete, then drop the fence to release its resources.
+        // (Blocking here is free: the render thread has no other work; the ECS sim
+        // thread runs independently.)
+        if let Some(f) = self.last_frame_fence.take() {
+            f.wait(None)?;
+        }
+        self.profiler.cleanup += t.elapsed();
+        t = Instant::now();
+
+        log::trace!("do_pass acquire_next_image pending");
+        #[cfg(feature = "tracy")]
+        let _acquire_span = tracy_client::span!("Acquire Swapchain Image");
         let (image_index, mut suboptimal, acquire_future) =
             match acquire_next_image(swapchain.clone(), None).map_err(Validated::unwrap) {
                 Ok(r) => r,
                 Err(VulkanError::OutOfDate) => return Ok(PassResult::SwapchainOutOfDate),
                 Err(e) => return Err(e.into()),
             };
+        #[cfg(feature = "tracy")]
+        drop(_acquire_span);
+        self.profiler.acquire += t.elapsed();
+        t = Instant::now();
 
-        // --- 1. DATA PREP ---
-        let mut instance_map: Vec<InstancePointer> = self
-            .new_packet
-            .triangles
-            .active_indices
-            .iter()
-            .map(|&storage_index| InstancePointer {
-                shape_type: TRIANGLE_SHAPE_INDEX,
-                local_index: storage_index,
-            })
-            .collect();
+        let entity_count = self.system.total_entity_count;
+        log::trace!("entity_count: {entity_count}");
 
-        instance_map.extend(
-            self.new_packet
-                .circles
-                .active_indices
-                .iter()
-                .map(|&storage_index| InstancePointer {
-                    shape_type: CIRCLE_SHAPE_INDEX,
-                    local_index: storage_index,
-                }),
-        );
-
-        if instance_map.is_empty() {
-            self.previous_frame_end = Some(
-                self.previous_frame_end
-                    .take()
-                    .unwrap()
-                    .join(acquire_future)
-                    .then_swapchain_present(
-                        queue,
-                        SwapchainPresentInfo::swapchain_image_index(swapchain, image_index),
-                    )
-                    .then_signal_fence_and_flush()?
-                    .boxed(),
-            );
-            return Ok(PassResult::Success);
-        }
-
-        let future = self.previous_frame_end.take().unwrap().join(acquire_future);
-
-        // --- 2. SINGLE COMMAND BUFFER ---
-        // We record BOTH uploads and draws into the same primary command buffer.
-        // This solves the locking issue because Vulkano sees them as a sequence
-        // in a single timeline and inserts the correct barriers automatically.
-        let mut builder = AutoCommandBufferBuilder::primary(
+        // --- 1. PREPARE COMMANDS ---
+        let mut upload_builder = AutoCommandBufferBuilder::primary(
             self.command_buffer_allocator.clone(),
             queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )?;
 
-        // A. Record Uploads
-        let map_buffer = self.system.upload_all(
-            self.memory_allocator.clone(),
-            &self.storage_allocator,
-            &mut builder, // Using the SAME builder
-            &self.new_packet,
-            &instance_map,
-        )?;
+        self.profiler.cmd_alloc += t.elapsed();
+        t = Instant::now();
 
-        // B. Create Descriptors
-        let descriptor_sets = self.system.create_descriptor_sets(
-            &self.pipeline,
-            self.descriptor_set_allocator.clone(),
-            map_buffer,
-        )?;
+        // A. Record Uploads (data channels + entity_heads + op_pool)
+        let thread_res = world.thread_local_res_mut();
+        if !thread_res.contains::<ThreadLocalAllocators>() {
+            thread_res.insert(ThreadLocalAllocators::new_thread_local(0, world));
+        }
+        let staging_allocator = &thread_res
+            .get::<ThreadLocalAllocators>()
+            .unwrap()
+            .staging_allocator;
+
+        let packet = world
+            .resources()
+            .get::<RenderPacket>()
+            .expect("RenderPacket resource missing from world");
+
+        // Only touch the GPU upload path (and advance interpolation heads) when the sim
+        // thread actually delivered new data. On no-data frames we re-bind the existing
+        // old/new buffers and redraw with a fresh interpolation factor.
+        let did_upload = self.needs_upload;
+        if did_upload {
+            if let Some(dirty) = &self.dirty_per_channel {
+                self.system.upload_all_dirty(
+                    self.memory_allocator.clone(),
+                    staging_allocator,
+                    &mut upload_builder,
+                    &packet,
+                    &self.new_delta,
+                    dirty,
+                )?
+            } else {
+                self.system.upload_all(
+                    self.memory_allocator.clone(),
+                    staging_allocator,
+                    &mut upload_builder,
+                    &packet,
+                    &self.new_delta,
+                )?
+            };
+
+            self.needs_upload = false;
+            self.new_delta = RenderDelta::default();
+            self.dirty_per_channel = None;
+        }
+
+        log::trace!(
+            "do_pass: entity_count={} head_index={} eh.head={} op.head={} path.head={} did_upload={}",
+            self.system.total_entity_count,
+            self.system.head_index,
+            self.system.entity_heads.head,
+            self.system.op_pool.head,
+            self.system.path_curves.head,
+            did_upload
+        );
+
+        self.profiler.upload += t.elapsed();
+        t = Instant::now();
+
+        // Build the frame's future. Include the upload command buffer only if we recorded one.
+        let future: Box<dyn GpuFuture> = if did_upload {
+            let upload_cmd = upload_builder.build()?;
+            sync::now(queue.device().clone())
+                .boxed()
+                .then_execute(queue.clone(), upload_cmd)?
+                .join(acquire_future)
+                .boxed()
+        } else {
+            // No uploads recorded; drop the empty builder and just join the acquire.
+            drop(upload_builder);
+            sync::now(queue.device().clone())
+                .boxed()
+                .join(acquire_future)
+                .boxed()
+        };
+
+        let descriptor_sets = self
+            .system
+            .get_descriptor_sets(&self.pipeline, self.descriptor_set_allocator.clone())?;
+        self.profiler.desc_sets += t.elapsed();
+        t = Instant::now();
 
         let push_constants = PushConstants {
             view_proj: create_camera_matrix(
@@ -265,7 +402,17 @@ impl PassManager {
         };
 
         // C. Record Draw
-        builder
+        log::trace!("do_pass Record Draw");
+        #[cfg(feature = "tracy")]
+        let _cmd_span = tracy_client::span!("Record Draw");
+
+        let mut draw_builder = AutoCommandBufferBuilder::primary(
+            self.command_buffer_allocator.clone(),
+            queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        draw_builder
             .begin_render_pass(
                 RenderPassBeginInfo {
                     clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
@@ -281,79 +428,64 @@ impl PassManager {
                 PipelineBindPoint::Graphics,
                 self.pipeline.layout().clone(),
                 0,
-                descriptor_sets,
+                descriptor_sets.to_vec(),
             )?
             .push_constants(self.pipeline.layout().clone(), 0, push_constants)?;
 
-        unsafe {
-            builder.draw(6, instance_map.len() as u32, 0, 0)?;
+        // One draw call: 6 vertices (quad) per entity, entity_count instances
+        log::trace!("do_pass builder draw");
+        let entity_count = self.system.total_entity_count;
+        if entity_count > 0 {
+            unsafe {
+                draw_builder.draw(6, entity_count as u32, 0, 0)?;
+            }
         }
 
-        builder.end_render_pass(SubpassEndInfo::default())?;
+        draw_builder.end_render_pass(SubpassEndInfo::default())?;
+        self.profiler.record_draw += t.elapsed();
+        t = Instant::now();
 
-        let command_buffer = builder.build()?;
+        let draw_cmd = draw_builder.build()?;
+        self.profiler.build_cmd += t.elapsed();
+        t = Instant::now();
+        #[cfg(feature = "tracy")]
+        drop(_cmd_span);
+
+        log::trace!("do_pass Record Draw done");
 
         // --- 3. EXECUTION ---
+        log::trace!("do_pass submit command buffer");
+        #[cfg(feature = "tracy")]
+        let _submit_span = tracy_client::span!("Submit & Present");
         let future = future
-            .then_execute(queue.clone(), command_buffer)?
+            .then_execute(queue.clone(), draw_cmd)?
             .then_swapchain_present(
                 queue.clone(),
                 SwapchainPresentInfo::swapchain_image_index(swapchain, image_index),
             )
+            .boxed()
             .then_signal_fence_and_flush();
 
         match future.map_err(Validated::unwrap) {
             Ok(f) => {
-                self.previous_frame_end = Some(f.boxed());
+                log::trace!("do_pass executed success");
+                self.last_frame_fence = Some(f);
+                log::trace!(
+                    "do_pass frame submitted | head_index={}",
+                    self.system.head_index
+                );
             }
             Err(VulkanError::OutOfDate) => {
+                log::trace!("OutOfDate: dropping fence — chain broken!");
                 suboptimal = true;
-                self.previous_frame_end = Some(sync::now(queue.device().clone()).boxed());
+                self.last_frame_fence = None;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                log::trace!("do_pass executed error: {e:?}");
+                return Err(e.into());
+            }
         }
 
-        Ok(if suboptimal {
-            PassResult::SwapchainOutOfDate
-        } else {
-            PassResult::Success
-        })
+        self.profiler.submit += t.elapsed();
     }
-
-    /// Handles window resizing by recreating framebuffers
-    pub fn resize(&mut self, images: &[Arc<Image>]) {
-        self.framebuffers = window_size_dependent_setup(images, &self.render_pass);
-        // We also update the viewport dimensions for the next draw
-        if let Some(image) = images.first() {
-            let extent = image.extent();
-            self.viewport.extent = [extent[0] as f32, extent[1] as f32];
-        }
-    }
-}
-
-pub enum PassResult {
-    Success,
-    SwapchainOutOfDate,
-}
-
-/// Creates the Framebuffer objects for each swapchain image
-fn window_size_dependent_setup(
-    images: &[Arc<Image>],
-    render_pass: &Arc<RenderPass>,
-) -> Vec<Arc<Framebuffer>> {
-    images
-        .iter()
-        .map(|image| {
-            let view = vulkano::image::view::ImageView::new_default(image.clone()).unwrap();
-
-            Framebuffer::new(
-                render_pass.clone(),
-                FramebufferCreateInfo {
-                    attachments: vec![view],
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>()
 }

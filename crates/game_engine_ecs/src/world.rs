@@ -1,24 +1,28 @@
 use log::warn;
 use smallvec::SmallVec;
 
-use crate::archetype::{Archetype, ArchetypeId};
+use crate::archetype::{Archetype, ArchetypeId, ArchetypeStore};
 use crate::bundle::{Bundle, ManyRowBundle};
 use crate::component::{
     ComponentId, ComponentMask, ComponentMeta, ComponentRegistry, MAX_COMPONENTS,
 };
 use crate::entity::{Entities, Entity};
+use crate::observers::{
+    IntoObserverSystem, ObserverExecutionQueue, ObserverId, ObserverStore, ObserverSystem,
+    ObserverSystemParam, TriggerEvent,
+};
 use crate::prelude::Component;
 use crate::query::{Filter, QueryState, QueryToken};
-use crate::resource::Resources;
+use crate::resource::{Resources, ThreadLocalResources, TypeIdMap};
 use crate::storage::TypeErasedSequence;
 use crate::system::UnsafeWorldCell;
-use crate::system::command::ThreadLocalCommandQueue;
+use crate::system::command::{ThreadLocalCommandQueue, ToBeDespawned};
 use crate::thread_entity_allocator::LocalThreadEntityAllocator;
-use crate::threading::{FromWorldThread, WorldThreadLocalStore};
-use std::any::type_name;
-use std::array;
+use crate::threading::{FromWorldThread, ThreadLocalWorldData, WorldThreadLocalStore};
+use std::any::{Any, TypeId, type_name};
 use std::ops::{Deref, Index, IndexMut};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
+use std::{array, ptr};
 
 #[derive(Clone, Copy, Debug)]
 pub struct EntityLocation {
@@ -43,7 +47,7 @@ impl EntityLocation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct ChangeTick(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -61,13 +65,16 @@ pub struct World {
     pub(crate) thread_local: WorldThreadLocalStore<ThreadLocalWorldData>,
     pub registry: ComponentRegistry,
     pub(crate) archetypes: ArchetypeStore,
+
+    pub(crate) observers: ObserverStore,
+
     // Maps Entity Index -> Location
     entity_index: Vec<Option<EntityLocation>>,
     resources: Resources,
     // This is updated between every batch/during a flush
     current_tick: ChangeTick,
     /// THis value is incremented every time we have finished running all the systems for a frame
-    curent_frame: FrameTick,
+    current_frame: FrameTick,
 }
 
 // SAFETY:
@@ -82,333 +89,6 @@ unsafe impl Send for World {}
 //    - ThreadLocals are protected by Thread ID isolation (Thread A never touches Thread B's slot).
 unsafe impl Sync for World {}
 
-pub struct ThreadLocalWorldData {
-    pub(crate) entity_allocator: LocalThreadEntityAllocator,
-    pub(crate) insert_buffer: EntityInsertBuffer,
-    pub(crate) command_queue: ThreadLocalCommandQueue,
-}
-
-impl<'a> CommandThreadLocalContext<'a> {
-    pub fn entity_allocator_mut(&mut self) -> &mut LocalThreadEntityAllocator {
-        self.entity_allocator
-    }
-
-    pub fn insert_buffer_mut(&mut self) -> &mut EntityInsertBuffer {
-        self.insert_buffer
-    }
-}
-
-impl ThreadLocalWorldData {
-    pub fn entity_allocator_mut(&mut self) -> &mut LocalThreadEntityAllocator {
-        &mut self.entity_allocator
-    }
-
-    pub fn insert_buffer_mut(&mut self) -> &mut EntityInsertBuffer {
-        &mut self.insert_buffer
-    }
-
-    pub fn entity_allocator(&self) -> &LocalThreadEntityAllocator {
-        &self.entity_allocator
-    }
-
-    pub fn insert_buffer(&self) -> &EntityInsertBuffer {
-        &self.insert_buffer
-    }
-}
-
-impl FromWorldThread for ThreadLocalWorldData {
-    fn new_thread_local(thread_id: usize, world: &World) -> Self {
-        Self {
-            entity_allocator: LocalThreadEntityAllocator::new_thread_local(thread_id, world),
-            insert_buffer: EntityInsertBuffer::new_thread_local(thread_id, world),
-            command_queue: ThreadLocalCommandQueue::new_thread_local(thread_id, world),
-        }
-    }
-}
-
-/// Special view of thread-local data not involving the command queue.
-pub struct CommandThreadLocalContext<'a> {
-    pub entity_allocator: &'a mut LocalThreadEntityAllocator,
-    pub insert_buffer: &'a mut EntityInsertBuffer,
-}
-
-#[derive(Default)]
-pub struct EntityInsertBuffer {
-    /// The entity ids to add, grouped by archetype
-    ids: Vec<Vec<Entity>>,
-
-    /// Mask per archetype
-    masks: Vec<ComponentMask>,
-
-    /// Cache sorted component ids and metas per archetype.
-    /// Used to reconstruct the empty sequences after flushing.
-    comp_ids: Vec<Vec<ComponentId>>,
-    comp_metas: Vec<Vec<ComponentMeta>>,
-
-    /// The sparse columns for each archetype's buffered entities.
-    bundle_cols: Vec<Box<[Option<TypeErasedSequence>; MAX_COMPONENTS]>>,
-}
-
-impl EntityInsertBuffer {
-    /// Resets the entity buffers but KEEPS the allocated sparse arrays.
-    pub fn clear_entities(&mut self) {
-        // We only clear the entity IDs.
-        // The sparse arrays (bundle_cols) are cleared/reset during the flush process
-        // to ensure slots remain valid (Some) for the next frame.
-        for ids in &mut self.ids {
-            ids.clear();
-        }
-    }
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        // We can just check the first archetype list or maintain a dirty flag
-        self.ids.iter().all(|v| v.is_empty())
-    }
-
-    fn get_or_create_archetype_buffer<B: Bundle>(&mut self, mask: ComponentMask) -> usize {
-        match self.masks.binary_search(&mask) {
-            Ok(index) => index,
-            Err(index) => {
-                self.masks.insert(index, mask);
-                self.ids.insert(index, Vec::new());
-                self.comp_ids.insert(index, Vec::new());
-                self.comp_metas.insert(index, Vec::new());
-
-                // Allocate the sparse array
-                let mut sparse_cols: Box<[Option<TypeErasedSequence>; MAX_COMPONENTS]> =
-                    Box::new(array::from_fn(|_| None));
-
-                // We collect here only once per archetype creation
-                let ids: Vec<ComponentId> = B::component_ids().collect();
-                let metas: Vec<ComponentMeta> = B::component_metas().collect();
-
-                let mut sorted_components: Vec<_> = ids.iter().zip(metas.iter()).collect();
-                sorted_components.sort_unstable_by_key(|(id, _)| **id);
-
-                let comp_ids_cache = &mut self.comp_ids[index];
-                let comp_metas_cache = &mut self.comp_metas[index];
-
-                for (&id, &meta) in sorted_components {
-                    comp_ids_cache.push(id);
-                    comp_metas_cache.push(meta);
-                    sparse_cols[id.0] = Some(TypeErasedSequence::new(&meta));
-                }
-
-                self.bundle_cols.insert(index, sparse_cols);
-                index
-            }
-        }
-    }
-
-    pub fn insert_bundle<B: Bundle>(&mut self, entity: Entity, bundle: B) {
-        let mask = ComponentMask::from_ids(B::component_ids());
-
-        let arch_index = self.get_or_create_archetype_buffer::<B>(mask);
-        let bundle_cols = &mut self.bundle_cols[arch_index];
-
-        // SAFETY:
-        // 1. `bundle_cols` is guaranteed to have `Some` at indices for `B::component_ids()`.
-        //    This is ensured by `get_or_create_archetype_buffer` AND `flush_into` (which replenishes slots).
-        unsafe {
-            bundle.put(bundle_cols.as_mut_slice());
-        }
-
-        self.ids[arch_index].push(entity);
-    }
-}
-
-impl FromWorldThread for EntityInsertBuffer {
-    fn new_thread_local(_thread_id: usize, _world: &World) -> Self {
-        Self::default()
-    }
-}
-
-#[cfg_attr(debug_assertions, derive(Debug))]
-pub struct ArchetypeStore {
-    inner: Vec<Archetype>,
-    // The Lookup: Sorted by Mask
-    lookup: Vec<(ComponentMask, ArchetypeId)>,
-}
-
-/// By not using a Vec directly, we can later change the storage strategy
-/// We also define only 2 mutating methods: push and index_mut
-impl Default for ArchetypeStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ArchetypeStore {
-    pub fn new() -> Self {
-        ArchetypeStore {
-            inner: Vec::new(),
-            lookup: Vec::new(),
-        }
-    }
-
-    #[inline(always)]
-    pub fn push(&mut self, archetype: Archetype) {
-        let mask = archetype.component_mask;
-        let id = archetype.id;
-        self.inner.push(archetype);
-
-        // Keep lookup sorted
-        let idx = self
-            .lookup
-            .binary_search_by_key(&mask, |(m, _)| *m)
-            .unwrap_err();
-        self.lookup.insert(idx, (mask, id));
-    }
-
-    #[inline(always)]
-    pub fn with(
-        &mut self,
-        from: ArchetypeId,
-        with: &ComponentId,
-        registry: &ComponentRegistry,
-    ) -> ArchetypeId {
-        match self.inner[from.0].with(with) {
-            Some(id) => id,
-            None => {
-                let mut new_mask = self.inner[from.0].component_mask;
-                new_mask.set_id(with);
-                let id = self.get_or_create_archetype_search(new_mask, registry);
-                self.inner[from.0].set_with(with, id);
-                self.inner[id.0].set_without(with, from);
-                id
-            }
-        }
-    }
-
-    #[inline(always)]
-    pub fn without(
-        &mut self,
-        from: ArchetypeId,
-        without: &ComponentId,
-        registry: &ComponentRegistry,
-    ) -> ArchetypeId {
-        match self.inner[from.0].without(without) {
-            Some(id) => id,
-            None => {
-                let mut new_mask = self.inner[from.0].component_mask;
-                new_mask.unset_id(without);
-                let id = self.get_or_create_archetype_search(new_mask, registry);
-                self.inner[from.0].set_without(without, id);
-                self.inner[id.0].set_with(without, from);
-                id
-            }
-        }
-    }
-
-    #[inline(always)]
-    pub fn get_disjoint_archetypes(
-        &mut self,
-        idx1: usize,
-        idx2: usize,
-    ) -> (&mut Archetype, &mut Archetype) {
-        assert!(idx1 != idx2, "Indices must be different");
-
-        let (first, second) = if idx1 < idx2 {
-            let (left, right) = self.inner.split_at_mut(idx2);
-            (&mut left[idx1], &mut right[0])
-        } else {
-            let (left, right) = self.inner.split_at_mut(idx1);
-            (&mut right[0], &mut left[idx2])
-        };
-
-        (first, second)
-    }
-
-    pub fn get_or_create_archetype_search(
-        &mut self,
-        mask: ComponentMask,
-        registry: &ComponentRegistry,
-    ) -> ArchetypeId {
-        match self.get_id_search(&mask) {
-            Some(arch) => arch,
-            None => self.create_archetype(mask, registry),
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn create_archetype(
-        &mut self,
-        component_mask: ComponentMask,
-        registry: &ComponentRegistry,
-    ) -> ArchetypeId {
-        let id = ArchetypeId(self.len());
-        let archetype = Archetype::new(id, component_mask, registry);
-        self.push(archetype);
-        id
-    }
-
-    pub fn get_or_create_archetype(
-        &mut self,
-        ids: &[ComponentId],
-        registry: &ComponentRegistry,
-    ) -> ArchetypeId {
-        let mut curr = self.get_or_create_empty(registry);
-
-        for id in ids.iter() {
-            curr = self.with(curr, &id, registry);
-        }
-
-        curr
-    }
-
-    fn get_or_create_empty(&mut self, registry: &ComponentRegistry) -> ArchetypeId {
-        if self
-            .lookup
-            .first()
-            .is_none_or(|(mask, _)| mask != &ComponentMask::new())
-        {
-            self.create_archetype(ComponentMask::new(), registry)
-        } else {
-            self.lookup[0].1
-        }
-    }
-
-    #[inline(always)]
-    pub fn get_id_search(&self, mask: &ComponentMask) -> Option<ArchetypeId> {
-        // Binary search is extremely fast on small-medium datasets
-        self.lookup
-            .binary_search_by_key(mask, |(m, _)| *m)
-            .ok()
-            .map(|idx| self.lookup[idx].1)
-    }
-
-    /// Gets an iterator over archetypes added since the given ArchetypeId.
-    #[inline(always)]
-    pub fn since(&self, last_seen: ArchetypeId) -> impl Iterator<Item = &Archetype> {
-        self.inner.iter().skip(last_seen.0)
-    }
-}
-
-impl Deref for ArchetypeStore {
-    type Target = Vec<Archetype>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl Index<ArchetypeId> for ArchetypeStore {
-    type Output = Archetype;
-
-    fn index(&self, index: ArchetypeId) -> &Self::Output {
-        self.inner.get(index.0).expect("ArchetypeId out of bounds")
-    }
-}
-
-impl IndexMut<ArchetypeId> for ArchetypeStore {
-    fn index_mut(&mut self, index: ArchetypeId) -> &mut Self::Output {
-        self.inner
-            .get_mut(index.0)
-            .expect("ArchetypeId out of bounds")
-    }
-}
-
 impl Default for World {
     fn default() -> Self {
         Self::new()
@@ -420,12 +100,16 @@ impl World {
         World {
             entities: Arc::new(RwLock::new(Entities::new())),
             thread_local: WorldThreadLocalStore::new(),
+            observers: ObserverStore {
+                observers: Vec::new(),
+                map: TypeIdMap::default(),
+            },
             registry: ComponentRegistry::new(),
             archetypes: ArchetypeStore::new(),
             entity_index: Vec::new(),
             resources: Resources::new(),
             current_tick: ChangeTick(1), // 0 can be special
-            curent_frame: FrameTick(0),
+            current_frame: FrameTick(0),
         }
     }
 
@@ -566,12 +250,14 @@ impl World {
     pub fn flush(&mut self) {
         #[cfg(feature = "tracy")]
         let _trace = {
-            let trace = tracy_client::span!("World::flush");
+            let trace = tracy_client::span!("World::flush", 100);
             trace.emit_color(0xFF0044);
             trace
         };
 
         self.flush_insert_buffer();
+        self.run_observers();
+        self.flush_despawns();
         let unsafe_world = UnsafeWorldCell::new(self);
         // We do this in an unsafe block because we are manually ensuring
         // that we are accsesing thread local data and the rest of the world separately.
@@ -580,6 +266,86 @@ impl World {
             for data in datas {
                 data.command_queue.apply(unsafe_world.world_mut());
             }
+        }
+    }
+
+    pub fn iter_thread_local(&mut self) -> impl Iterator<Item = &mut ThreadLocalWorldData> {
+        self.thread_local.iter_mut()
+    }
+
+    fn run_observers(&mut self) {
+        {
+            let cell = UnsafeWorldCell::new(self);
+            for (observer_idx, observer) in unsafe { cell.world_mut() }
+                .observers
+                .observers
+                .iter_mut()
+                .enumerate()
+            {
+                unsafe { cell.world_mut() }
+                    .thread_local
+                    .iter_mut()
+                    .for_each(|t| {
+                        let observer_execution_queue = &mut t.observer_queue;
+                        if let Some(exec_ctxs) = observer_execution_queue.waiting.get(observer_idx)
+                        {
+                            for exec_ctx in exec_ctxs {
+                                unsafe {
+                                    let Some(loc) = cell.world().entity_location(exec_ctx.entity)
+                                    else {
+                                        continue;
+                                    };
+
+                                    let event_ptr = observer_execution_queue
+                                        .arena
+                                        .as_mut_ptr()
+                                        .add(exec_ctx.data_offset);
+                                    observer.run(&cell, exec_ctx.entity, loc, event_ptr);
+                                }
+                            }
+                        };
+                    });
+            }
+        }
+
+        // Clean up observer data.
+        self.thread_local.iter_mut().for_each(|t| {
+            t.observer_queue.waiting.iter_mut().for_each(|e| e.clear());
+            t.observer_queue.drop_arena();
+            t.observer_queue.arena.clear();
+            t.observer_queue.drop_shims.clear();
+        });
+    }
+
+    fn flush_despawns(&mut self) {
+        let ents = &mut *self.entities.write().unwrap();
+        for despawns in self.thread_local.iter_mut().map(|data| {
+            data.thread_local_resorces
+                .get_or_insert_default::<ToBeDespawned>()
+        }) {
+            for to_despawn in despawns.to_be_despawned.iter() {
+                if !ents.is_alive(*to_despawn) {
+                    continue;
+                }
+
+                if ents.is_initialized(*to_despawn) {
+                    let loc = self.entity_index[to_despawn.index() as usize]
+                        .take()
+                        .expect("Entity should have a location"); // this should always be Some if the entity
+                    // is alive
+
+                    if let Some(moved) = self.archetypes[loc.archetype_id].swap_remove(loc.row) {
+                        let ent_loc = self.entity_index[moved.index() as usize]
+                            .as_mut()
+                            .expect("Moved entity should have a location");
+                        ent_loc.row = loc.row;
+                    };
+
+                    self.entity_index[to_despawn.index() as usize] = None;
+                }
+                ents.free(*to_despawn);
+            }
+            despawns.to_be_despawned.clear();
         }
     }
 
@@ -622,7 +388,6 @@ impl World {
 
                     dest_col.set_tick(self.current_tick);
 
-                    // Append moves data. If dest is empty, it steals the buffer (via new optimization).
                     dest_col.append(src_seq);
 
                     *slot = Some(TypeErasedSequence::new(&metas[j]));
@@ -666,42 +431,21 @@ impl World {
     /// Attempts to insert a component into an existing entity.
     /// silently returns if state is invalid.
     pub fn insert_component<T: Component>(&mut self, entity: Entity, component: T) {
-        if !(self.entities().is_alive(entity) && self.entities().is_initialized(entity)) {
-            return;
-        }
-
-        let loc = match self.entity_index[entity.index() as usize] {
-            Some(loc) => loc,
-            None => {
-                warn!(
-                    "Attempted to insert component into non-existent or uninitialized entity {entity:?}. {}",
-                    type_name::<T>()
-                );
-                return;
-            }
+        let (loc, new_id) = match self.alloc_insert::<T>(entity) {
+            Some(value) => value,
+            None => return,
         };
 
-        if !self.entities().is_initialized(entity) {
-            warn!(
-                "Attempted to insert component into uninitialized entity {entity:?}. {}",
-                type_name::<T>()
-            );
-            return;
-        }
+        self.do_insert(entity, component, loc, new_id);
+    }
 
-        let new_id = self.archetypes.with(
-            loc.archetype_id,
-            &self.registry.register::<T>(),
-            &self.registry,
-        );
-
-        // If the archetype ID didn't change, the entity
-        // alread had the component. We must return here, otherwise
-        // get_disjoint_archetypes will panic (indices must be different).
-        if new_id == loc.archetype_id {
-            return;
-        }
-
+    pub(crate) fn do_insert<T: Component>(
+        &mut self,
+        entity: Entity,
+        component: T,
+        loc: EntityLocation,
+        new_id: ArchetypeId,
+    ) {
         let (from_arch, to_arch) = self
             .archetypes
             .get_disjoint_archetypes(loc.archetype_id.0, new_id.0);
@@ -738,6 +482,38 @@ impl World {
             .as_mut()
             .expect("ideally we have checked above and this can never happen")
             .row = self.archetypes[new_id].len() - 1;
+    }
+
+    pub(crate) fn alloc_insert<T: Component>(
+        &mut self,
+        entity: Entity,
+    ) -> Option<(EntityLocation, ArchetypeId)> {
+        if !(self.entities().is_alive(entity) && self.entities().is_initialized(entity)) {
+            warn!(
+                "Attempted to insert component into dead or uninitialized entity {entity:?}. {}",
+                type_name::<T>()
+            );
+            return None;
+        }
+        let loc = match self.entity_index[entity.index() as usize] {
+            Some(loc) => loc,
+            None => {
+                warn!(
+                    "Attempted to insert component into non-existent or uninitialized entity {entity:?}. {}",
+                    type_name::<T>()
+                );
+                return None;
+            }
+        };
+        let new_id = self.archetypes.with(
+            loc.archetype_id,
+            &self.registry.register::<T>(),
+            &self.registry,
+        );
+        if new_id == loc.archetype_id {
+            return None;
+        }
+        Some((loc, new_id))
     }
 
     pub fn remove_component<T: Component>(&mut self, entity: Entity) {
@@ -805,8 +581,35 @@ impl World {
         target_loc.row = self.archetypes[new_id].len() - 1;
     }
 
+    pub fn add_observer<E: TriggerEvent, P: ObserverSystemParam, M>(
+        &mut self,
+        o: impl IntoObserverSystem<E, M, P>,
+    ) {
+        self.observers
+            .map
+            .entry(TypeId::of::<E>())
+            .or_default()
+            .push(ObserverId(self.observers.observers.len()));
+        let mut observer = o.into_observer_system();
+        observer.init(self);
+        self.observers.observers.push(Box::new(observer));
+    }
+
     pub fn query<Q: QueryToken, F: Filter>(&'_ mut self) -> QueryState<'_, Q, F> {
         QueryState::new(self)
+    }
+
+    /// Evaluates a system parameter (e.g. multiple disjoint `ResMut`s) and runs the provided closure.
+    /// This is very useful when you have a mutable reference to the `World` and need to access
+    /// multiple disjoint resources at once.
+    pub fn system_param_with<P: crate::system::SystemParam, R, F: FnOnce(P::Item<'_, '_>) -> R>(
+        &mut self,
+        f: F,
+    ) -> R {
+        let mut access = crate::system::SystemAccess::new(self);
+        let mut state = P::init_state(self, &mut access);
+        let cell = crate::system::UnsafeWorldCell::new(self);
+        f(unsafe { P::get_param(&mut state, &cell) })
     }
 
     pub fn resources_mut(&mut self) -> &mut Resources {
@@ -817,12 +620,26 @@ impl World {
         &self.resources
     }
 
+    /// Get the calling thread's local resource map (mutable).
+    /// # Safety
+    /// Only call from within a system — the ECS guarantees thread isolation.
+    pub fn thread_local_res(&self) -> &ThreadLocalResources {
+        &self.thread_local().thread_local_resorces
+    }
+
+    /// Get the calling thread's local resource map (mutable).
+    /// # Safety
+    /// Only call from within a system — the ECS guarantees thread isolation.
+    pub fn thread_local_res_mut(&self) -> &mut ThreadLocalResources {
+        &mut self.thread_local_mut().thread_local_resorces
+    }
+
     pub fn increment_tick(&mut self) {
         self.current_tick.0 = self.current_tick.0.wrapping_add(1);
     }
 
     pub fn increment_frame(&mut self) {
-        self.curent_frame.0 = self.curent_frame.0.wrapping_add(1);
+        self.current_frame.0 = self.current_frame.0.wrapping_add(1);
     }
 
     /// Get the locarion of an entity in the world.

@@ -9,6 +9,9 @@ use std::cell::{RefCell, RefMut};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
+const MIN_PAR_LEN: usize = 2048;
+const PAR_CHUNK: usize = 1024;
+
 // ============================================================================
 // Internal Machinery (Fetch & View)
 // ============================================================================
@@ -39,7 +42,7 @@ pub trait Fetch<'a> {
 }
 
 /// A View defines how to access data from an Archetype for a specific lifetime 'a.
-pub trait View<'a>: Sized {
+pub trait View<'a, S>: Sized {
     type Item;
     type Fetch: Fetch<'a, Item = Self::Item>;
 
@@ -51,14 +54,15 @@ pub trait View<'a>: Sized {
     /// It will be used in accordance with the borrow rules established by borrow_columns.
     unsafe fn create_fetch(
         archetype: *mut Archetype,
-        registry: &ComponentRegistry,
         tick: ChangeTick,
+        state: &S,
     ) -> Option<Self::Fetch>;
 }
 
 /// Trait for the static metadata required to manage a query (IDs, Locks).
 /// This MUST be 'static.
-pub trait QueryData: 'static + Send + Sync {
+pub trait QueryData<S>: 'static + Send + Sync {
+    fn create_state(registry: &ComponentRegistry) -> S;
     fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>);
     fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker);
 }
@@ -67,10 +71,11 @@ pub trait QueryData: 'static + Send + Sync {
 /// Implemented for &'static T, &'static mut T, and tuples.
 /// Bridge between the lifetime-bound View and the static QueryData.
 pub trait QueryToken {
+    type State: Sized + 'static + Send + Sync;
     /// The actual View type constructed during iteration with lifetime 'a.
-    type View<'a>: View<'a>;
+    type View<'a>: View<'a, Self::State>;
     /// The static metadata type.
-    type Persistent: QueryData;
+    type Persistent: QueryData<Self::State>;
 }
 
 // --- Read Implementation ---
@@ -103,11 +108,6 @@ impl<'a, T: 'static> Fetch<'a> for ReadFetch<T> {
     }
 }
 
-// ============================================================================
-// Public Interface (QueryToken)
-//    This is the bridge between Static Types (Query<(&A, &B)>) and Dynamic Views.
-// ============================================================================
-
 /// Marker trait for QueryTokens that do not require exclusive access.
 /// This allows the query to be iterated via `&self`.
 /// # Safety
@@ -125,11 +125,9 @@ macro_rules! impl_readonly_tuples {
 }
 auto_impl_all_tuples!(impl_readonly_tuples);
 
-// ============================================================================
-// Token and static impls
-// ============================================================================
-
 impl<T: Component> QueryToken for &T {
+    type State = ComponentId;
+
     type View<'a> = &'a T;
     type Persistent = ReadComponent<T>;
 }
@@ -137,7 +135,7 @@ impl<T: Component> QueryToken for &T {
 #[derive(Debug)]
 pub struct ReadComponent<T>(PhantomData<T>);
 
-impl<T: Component> QueryData for ReadComponent<T> {
+impl<T: Component> QueryData<ComponentId> for ReadComponent<T> {
     // Populate registry and requred data
     fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
         out.push(registry.register::<T>());
@@ -146,9 +144,16 @@ impl<T: Component> QueryData for ReadComponent<T> {
     fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {
         checker.borrow(registry.get_id::<T>().expect("Component not registered"));
     }
+
+    fn create_state(registry: &ComponentRegistry) -> ComponentId {
+        // Safety: We must have populateed ids
+        unsafe { registry.get_id::<T>().unwrap_unchecked() }
+    }
 }
 
 impl<T: Component> QueryToken for &mut T {
+    type State = ComponentId;
+
     type View<'a> = Mut<'a, T>;
     type Persistent = WriteComponent<T>;
 }
@@ -156,7 +161,7 @@ impl<T: Component> QueryToken for &mut T {
 #[derive(Debug)]
 pub struct WriteComponent<T>(PhantomData<T>);
 
-impl<T: Component> QueryData for WriteComponent<T> {
+impl<T: Component> QueryData<ComponentId> for WriteComponent<T> {
     fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
         out.push(registry.register::<T>());
     }
@@ -164,9 +169,16 @@ impl<T: Component> QueryData for WriteComponent<T> {
     fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {
         checker.borrow_mut(registry.get_id::<T>().expect("Component not registered"));
     }
+
+    fn create_state(registry: &ComponentRegistry) -> ComponentId {
+        // Safety: We must have populateed ids
+        unsafe { registry.get_id::<T>().unwrap_unchecked() }
+    }
 }
 
 impl<T: QueryToken> QueryToken for Option<T> {
+    type State = T::State;
+
     type View<'a> = Option<T::View<'a>>;
     type Persistent = OptionalData<T::Persistent>;
 }
@@ -174,7 +186,7 @@ impl<T: QueryToken> QueryToken for Option<T> {
 #[derive(Debug)]
 pub struct OptionalData<T>(PhantomData<T>);
 
-impl<T: QueryData> QueryData for OptionalData<T> {
+impl<S, T: QueryData<S>> QueryData<S> for OptionalData<T> {
     fn populate_ids(registry: &mut ComponentRegistry, _out: &mut Vec<ComponentId>) {
         T::populate_ids(registry, &mut Vec::new());
     }
@@ -182,19 +194,23 @@ impl<T: QueryData> QueryData for OptionalData<T> {
     fn borrow_columns(registry: &ComponentRegistry, checker: &mut ColumnBorrowChecker) {
         T::borrow_columns(registry, checker);
     }
+
+    fn create_state(registry: &ComponentRegistry) -> S {
+        T::create_state(registry)
+    }
 }
 
-impl<'a, V: View<'a>> View<'a> for Option<V> {
+impl<'a, S, V: View<'a, S>> View<'a, S> for Option<V> {
     type Item = Option<V::Item>;
     type Fetch = OptionalFetch<V::Fetch>;
 
     unsafe fn create_fetch(
         archetype: *mut Archetype,
-        registry: &ComponentRegistry,
         tick: ChangeTick,
+        state: &S,
     ) -> Option<Self::Fetch> {
         Some(OptionalFetch(unsafe {
-            V::create_fetch(archetype, registry, tick)
+            V::create_fetch(archetype, tick, state)
         }))
     }
 }
@@ -267,16 +283,15 @@ impl<'a, T: 'static> Fetch<'a> for WriteFetch<'a, T> {
     }
 }
 
-impl<'a, T: Component> View<'a> for Mut<'a, T> {
+impl<'a, T: Component> View<'a, ComponentId> for Mut<'a, T> {
     type Item = Mut<'a, T>;
     type Fetch = WriteFetch<'a, T>;
 
     unsafe fn create_fetch(
         archetype: *mut Archetype,
-        registry: &ComponentRegistry,
         tick: ChangeTick,
+        id: &ComponentId,
     ) -> Option<Self::Fetch> {
-        let id = registry.get_id::<T>()?;
         let column = unsafe { &mut *archetype }.column_mut(&id)?;
 
         // SAFETY: We have exclusive access to the column due to the mutable borrow.
@@ -284,7 +299,7 @@ impl<'a, T: Component> View<'a> for Mut<'a, T> {
         // The column's layout must match T as it was registered.
         // The Column Must make sure that the ptr is valid for T.
         // And the ticks pointer must be pointing to a valid u32 array. parrallel to data.
-        let ptr = column.get_ptr(0) as *mut T;
+        let ptr = unsafe { column.get_ptr_unsafe(0) } as *mut T;
         let ticks_ptr = column.get_ticks_ptr();
         Some(WriteFetch {
             ptr: unsafe { NonNull::new_unchecked(ptr) },
@@ -295,16 +310,15 @@ impl<'a, T: Component> View<'a> for Mut<'a, T> {
     }
 }
 
-impl<'a, T: Component> View<'a> for &'a T {
+impl<'a, T: Component> View<'a, ComponentId> for &'a T {
     type Item = &'a T;
     type Fetch = ReadFetch<T>;
 
     unsafe fn create_fetch(
         archetype: *mut Archetype,
-        registry: &ComponentRegistry,
         _tick: ChangeTick,
+        id: &ComponentId,
     ) -> Option<Self::Fetch> {
-        let id = registry.get_id::<T>()?;
         let column = unsafe { &mut *archetype }.column_mut(&id)?;
 
         let ptr = column.get_ptr(0) as *mut T;
@@ -343,22 +357,24 @@ impl<'a, T> std::ops::DerefMut for Mut<'a, T> {
 impl QueryToken for Entity {
     type View<'a> = Entity;
     type Persistent = EntityData;
+    type State = ();
 }
 
 pub struct EntityData;
-impl QueryData for EntityData {
+impl QueryData<()> for EntityData {
     fn populate_ids(_: &mut ComponentRegistry, _: &mut Vec<ComponentId>) {}
     fn borrow_columns(_: &ComponentRegistry, _: &mut ColumnBorrowChecker) {}
+    fn create_state(_: &ComponentRegistry) -> () {}
 }
 
-impl<'a> View<'a> for Entity {
+impl<'a> View<'a, ()> for Entity {
     type Item = Entity;
     type Fetch = EntityFetch<'a>;
 
     unsafe fn create_fetch(
         archetype: *mut Archetype,
-        _registry: &ComponentRegistry,
         _tick: ChangeTick,
+        _state: &(),
     ) -> Option<Self::Fetch> {
         Some(EntityFetch {
             entities: unsafe { &*archetype }.entities(),
@@ -390,19 +406,6 @@ impl<'a> Fetch<'a> for EntityFetch<'a> {
     }
 }
 
-// --- Impl for &'static mut T ---
-
-// ============================================================================
-// The QueryInner Struct (Stores Static Data & State)
-// ============================================================================
-
-#[derive(Debug)]
-pub(crate) struct QueryStateInternal {
-    cached_archetypes: Vec<ArchetypeId>,
-    last_updated_arch_idx: ArchetypeId,
-    borrow_checker: ColumnBorrowChecker,
-}
-
 /// `QueryInner` acts as the persistent state for a system query.
 ///
 /// It holds:
@@ -411,9 +414,13 @@ pub(crate) struct QueryStateInternal {
 ///
 /// This struct is `Send + Sync` because it only holds metadata, not actual component references.
 #[derive(Debug)]
-pub struct QueryInner<QD: QueryData, FD: FilterData = ()> {
-    /// Internal mutable state (cache, borrow checker).
-    state: RefCell<QueryStateInternal>,
+pub struct QueryInner<S, QD: QueryData<S>, FD: FilterData = ()> {
+    matches: Vec<bool>,
+    state: S,
+
+    cached_archetypes: Vec<ArchetypeId>,
+    last_updated_arch_idx: ArchetypeId,
+    borrow_checker: ColumnBorrowChecker,
 
     /// Mask of components required by the View (e.g., `&Position`, `&mut Velocity`).
     view_required: ComponentMask,
@@ -426,10 +433,10 @@ pub struct QueryInner<QD: QueryData, FD: FilterData = ()> {
 
 // SAFETY: QueryInner only holds integers (IDs) and bitmasks. It does not hold
 // references to World data.
-unsafe impl<QD: QueryData, FD: FilterData> Send for QueryInner<QD, FD> {}
-unsafe impl<QD: QueryData, FD: FilterData> Sync for QueryInner<QD, FD> {}
+unsafe impl<S, QD: QueryData<S>, FD: FilterData> Send for QueryInner<S, QD, FD> {}
+unsafe impl<S, QD: QueryData<S>, FD: FilterData> Sync for QueryInner<S, QD, FD> {}
 
-impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
+impl<S, QD: QueryData<S>, FD: FilterData> QueryInner<S, QD, FD> {
     /// Factory method that takes Dynamic tokens (`Q`, `F`) to extract their
     /// Static counterparts (`QD`, `FD`) and initialize the struct.
     pub fn new<Q: QueryToken<Persistent = QD>, F: Filter<Persistent = FD>>(
@@ -454,34 +461,41 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         borrow_checker.overlay(&filter_borrow_checker);
 
         Self {
-            state: RefCell::new(QueryStateInternal {
-                cached_archetypes: Vec::new(),
-                last_updated_arch_idx: ArchetypeId(0),
-                borrow_checker,
-            }),
+            state: QD::create_state(registry),
+            matches: Vec::new(),
             view_required: ComponentMask::from_ids(view_required),
             filter_required: ComponentMask::from_ids(filter_required),
             filter_excluded: ComponentMask::from_ids(filter_excluded),
             _marker: PhantomData,
+            cached_archetypes: Vec::new(),
+            last_updated_arch_idx: ArchetypeId(0),
+            borrow_checker,
         }
     }
 
     /// Scans new archetypes in the World since the last update and adds matches to the cache.
     #[inline(always)]
-    fn update_archetype_cache(&self, world: &World, state: &mut QueryStateInternal) {
-        if state.last_updated_arch_idx.0 == world.archetypes.len() {
+    pub fn update_archetype_cache(&mut self, world: &World) {
+        if self.last_updated_arch_idx.0 == world.archetypes.len() {
             return;
         }
-        for arch in world.archetypes.since(state.last_updated_arch_idx) {
+        for arch in world.archetypes.since(self.last_updated_arch_idx) {
             if self.check_archetype(arch) {
-                state.cached_archetypes.push(arch.id);
+                self.matches.push(true);
+                self.cached_archetypes.push(arch.id);
+            } else {
+                self.matches.push(false);
             }
         }
-        state.last_updated_arch_idx.0 = world.archetypes.len();
+        self.last_updated_arch_idx.0 = world.archetypes.len();
     }
 
     /// Checks if a specific archetype matches the View and Filter requirements.
     fn check_archetype(&self, arch: &Archetype) -> bool {
+        if let Some(matches) = self.matches.get(arch.id.0) {
+            return *matches;
+        }
+
         // Must have all components requested by the View (e.g., &Position)
         if !arch.component_mask.contains_all(&self.view_required) {
             return false;
@@ -500,10 +514,10 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     /// Validates that the query's borrow requirements do not conflict internally.
     /// Also applies these borrows to the matching archetypes in the world to ensure
     /// runtime safety against other simultaneous queries (if we were multi-threaded without a scheduler).
-    pub(crate) fn borrow_check(&self, world: &mut World, state: &mut QueryStateInternal) -> bool {
-        for &arch_id in &state.cached_archetypes {
+    pub(crate) fn borrow_check(&self, world: &mut World) -> bool {
+        for &arch_id in &self.cached_archetypes {
             let arch = &mut world.archetypes[arch_id];
-            if !state.borrow_checker.apply_borrow(arch) {
+            if !self.borrow_checker.apply_borrow(arch) {
                 return false;
             }
         }
@@ -517,17 +531,13 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
         world: &World,
         start_from: ArchetypeId,
     ) -> Vec<(ArchetypeId, ColumnBorrowChecker)> {
-        let mut state = self.state.borrow_mut();
-        self.update_archetype_cache(world, &mut state);
-
-        state
-            .cached_archetypes
+        self.cached_archetypes
             .iter()
             .filter(|&&id| id >= start_from)
             .copied()
             .map(|arch_id| {
                 let arch = &world.archetypes[arch_id];
-                (arch_id, state.borrow_checker.for_archetype(arch))
+                (arch_id, self.borrow_checker.for_archetype(arch))
             })
             .collect()
     }
@@ -537,29 +547,20 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     /// # Generic Parameters
     /// * `V`: The Dynamic View type (e.g., `&'a Position`).
     /// * `F`: The Dynamic Filter type (e.g., `Changed<Velocity>`).
-    pub fn iter<'a, V: View<'a>, F: Filter<Persistent = FD>>(
+    pub fn iter<'a, V: View<'a, S>, F: Filter<Persistent = FD>>(
         &'a self,
         world: &'a UnsafeWorldCell<'a>,
         tick: ChangeTick,
-    ) -> QueryIter<'a, V, F> {
-        let mut state_guard = self.state.borrow_mut();
-
-        self.update_archetype_cache(unsafe { world.world() }, &mut state_guard);
-
-        if !self.borrow_check(unsafe { world.world_mut() }, &mut state_guard) {
-            panic!("Query borrow conflict detected");
-        }
-
+    ) -> QueryIter<'a, S, V, F> {
         // Pointer Setup for the Iterator
-        let archetype_ids_ptr = state_guard.cached_archetypes.as_slice() as *const [ArchetypeId];
-        let borrow_checker_ptr = &mut state_guard.borrow_checker as *mut ColumnBorrowChecker;
+        let archetype_ids_ptr = self.cached_archetypes.as_slice() as *const [ArchetypeId];
+        let borrow_checker_ptr = &self.borrow_checker;
 
         QueryIter {
             world,
-            _state_guard: state_guard,
             archetype_ids: archetype_ids_ptr,
             current_arch_idx: 0,
-            borrow_checker: borrow_checker_ptr,
+            state: &self.state,
             current_fetch: None,
             current_skip_filter: None,
             current_len: 0,
@@ -571,7 +572,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     /// Iterates deeply, running a closure on every match.
     /// This is often faster than `iter()` because it avoids strict iterator state management
     /// and compiler optimization barriers.
-    pub fn for_each<'a, V: View<'a>, F: Filter<Persistent = FD>, Func>(
+    pub fn for_each<'a, V: View<'a, S>, F: Filter<Persistent = FD>, Func>(
         &'a self,
         world: &'a UnsafeWorldCell<'a>,
         mut func: Func,
@@ -579,14 +580,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     ) where
         Func: FnMut(V::Item),
     {
-        let mut state = self.state.borrow_mut();
-
-        self.update_archetype_cache(unsafe { world.world() }, &mut state);
-        if !self.borrow_check(unsafe { world.world_mut() }, &mut state) {
-            panic!("Query borrow conflict detected");
-        }
-
-        for &arch_id in &state.cached_archetypes {
+        for &arch_id in &self.cached_archetypes {
             // SAFETY: We iterate distinct archetypes sequentially.
             let arch = unsafe { &mut world.world_mut().archetypes[arch_id] } as *mut Archetype;
 
@@ -603,7 +597,7 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             // Create Fetch (pointers to data columns)
             // SAFETY: We know that the columns used by the view are correctly borrowed
             if let Some(mut fetch) =
-                unsafe { V::create_fetch(arch, &world.world().registry, world.world().tick()) }
+                unsafe { V::create_fetch(arch, world.world().tick(), &self.state) }
             {
                 if let Some(skip_filter) = &mut current_skip_filter {
                     for _ in 0..len {
@@ -629,12 +623,105 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
                 }
             }
         }
+    }
 
-        self.release_borrows(unsafe { world.world_mut() }, &mut state);
+    /// Iterates deeply, running a closure on every match using rayon to be parallel.
+    pub fn for_each_par<'a, V: View<'a, S>, F: Filter<Persistent = FD>, Func>(
+        &'a self,
+        world: &'a UnsafeWorldCell<'a>,
+        mut func: Func,
+        tick: ChangeTick,
+    ) where
+        Func: FnMut(V::Item) + Send + Sync + Clone,
+    {
+        let current_tick = unsafe { world.world().tick() };
+
+        for &arch_id in &self.cached_archetypes {
+            let len = unsafe { world.world().archetypes[arch_id].len() };
+            if len == 0 {
+                continue;
+            }
+
+            if len > MIN_PAR_LEN {
+                rayon::scope(|s| {
+                    let mut offset = 0;
+                    while offset < len {
+                        let batch = PAR_CHUNK.min(len - offset);
+                        let current_offset = offset;
+
+                        let mut func_clone = func.clone();
+                        let world_cell = world.clone(); // UnsafeWorldCell is Copy/Send/Sync
+
+                        s.spawn(move |_| {
+                            // SAFETY: The query borrow checker has locked the columns.
+                            // We use the raw world access to bypass the &mut World aliasing rules.
+                            unsafe {
+                                let raw_world_mut = world_cell.world_mut();
+                                let registry = &raw_world_mut.registry;
+                                let arch_ptr =
+                                    &mut raw_world_mut.archetypes[arch_id] as *mut Archetype;
+
+                                let mut skip_filter =
+                                    F::create_skip_filter(arch_ptr, registry, tick);
+                                let fetch_opt =
+                                    V::create_fetch(arch_ptr, current_tick, &self.state);
+
+                                if let Some(mut fetch) = fetch_opt {
+                                    // CRITICAL: Advance the fetch and filter to this thread's specific chunk
+                                    if let Some(ref mut filter) = skip_filter {
+                                        filter.skip_rows(current_offset);
+                                    }
+                                    fetch.skip(current_offset);
+
+                                    // Process the batch
+                                    if let Some(mut filter) = skip_filter {
+                                        for _ in 0..batch {
+                                            if filter.should_skip() {
+                                                fetch.skip(1);
+                                                continue;
+                                            }
+                                            func_clone(fetch.next());
+                                        }
+                                    } else {
+                                        for _ in 0..batch {
+                                            func_clone(fetch.next());
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                        offset += batch;
+                    }
+                });
+            } else {
+                // Sequential fallback for small archetypes
+                unsafe {
+                    let raw_world = world.world_mut();
+                    let arch_ptr = &mut raw_world.archetypes[arch_id] as *mut Archetype;
+                    let skip_filter = F::create_skip_filter(arch_ptr, &raw_world.registry, tick);
+
+                    if let Some(mut fetch) = V::create_fetch(arch_ptr, current_tick, &self.state) {
+                        if let Some(mut filter) = skip_filter {
+                            for _ in 0..len {
+                                if filter.should_skip() {
+                                    fetch.skip(1);
+                                    continue;
+                                }
+                                func(fetch.next());
+                            }
+                        } else {
+                            for _ in 0..len {
+                                func(fetch.next());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Fetches a specific entity's data if it matches the query.
-    pub fn get<'a, V: View<'a>, F: Filter<Persistent = FD>>(
+    pub fn get<'a, V: View<'a, S>, F: Filter<Persistent = FD>>(
         &'a self,
         world: &'a UnsafeWorldCell<'a>,
         entity: Entity,
@@ -642,8 +729,6 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
     ) -> Option<GetGuard<'a, V::Item>> {
         // We only need the state lock to update cache/check masks and get raw borrows.
         // We DO NOT hold the lock while returning the GetGuard.
-        let mut state = self.state.borrow_mut();
-
         let location = unsafe { world.world().entity_location(entity) }?;
 
         let arch_id = location.archetype_id();
@@ -654,13 +739,12 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             return None;
         }
 
-        if !state.borrow_checker.apply_borrow(unsafe { &*arch }) {
+        if !self.borrow_checker.apply_borrow(unsafe { &*arch }) {
             panic!("Query borrow conflict detected");
         }
 
         // Create Fetch pointing to the start of the archetype
-        let mut fetch =
-            unsafe { V::create_fetch(arch, &world.world().registry, world.world().tick()) }?;
+        let mut fetch = unsafe { V::create_fetch(arch, world.world().tick(), &self.state) }?;
 
         if let Some(mut skip_filter) =
             unsafe { F::create_skip_filter(arch, &world.world().registry, tick) }
@@ -670,26 +754,60 @@ impl<QD: QueryData, FD: FilterData> QueryInner<QD, FD> {
             if skip_filter.should_skip() {
                 // Entity is filtered out
                 // Release local borrows before returning
-                state.borrow_checker.release_borrow(unsafe { &mut *arch });
+                self.borrow_checker.release_borrow(unsafe { &mut *arch });
                 return None;
             }
         }
 
         // Get the specific row data
         // SAFETY: `location.row()` comes from `world.entity_index` which is kept in sync with archetypes.
-        unsafe { Some(GetGuard::new(fetch.get(location.row()))) }
+        let borrows = self.borrow_checker.get_raw_borrows(unsafe { &*arch });
+        unsafe { Some(GetGuard::new(fetch.get(location.row()), borrows)) }
+    }
+
+    /// Fast get() for use inside scheduled systems where borrow safety
+    /// is guaranteed by the scheduler.
+    ///
+    /// # Safety
+    /// You must only run in a system where we have exclusive access
+    #[inline(always)]
+    pub unsafe fn get_unchecked<'a, V: View<'a, S>, F: Filter<Persistent = FD>>(
+        &'a self,
+        world: &'a UnsafeWorldCell<'a>,
+        entity: Entity,
+        tick: ChangeTick,
+    ) -> Option<V::Item> {
+        let location = unsafe { world.world().entity_location(entity) }?;
+        let arch_id = location.archetype_id();
+        let arch = unsafe { &mut world.world_mut().archetypes[arch_id] } as *mut Archetype;
+
+        if !self.check_archetype(unsafe { &*arch }) {
+            return None;
+        }
+
+        let mut fetch = unsafe { V::create_fetch(arch, world.world().tick(), &self.state) }?;
+        if let Some(mut skip_filter) =
+            unsafe { F::create_skip_filter(arch, &world.world().registry, tick) }
+        {
+            // Apply filter logic up to the target row
+            skip_filter.skip_rows(location.row());
+            if skip_filter.should_skip() {
+                return None;
+            }
+        }
+        Some(unsafe { fetch.get(location.row()) })
     }
 
     /// Releases locks on all cached archetypes. Called when Iterators/Guards drop.
-    fn release_borrows(&self, world: &mut World, state: &mut QueryStateInternal) {
-        for &arch_id in &state.cached_archetypes {
+    fn release_borrows(&self, world: &mut World) {
+        for &arch_id in &self.cached_archetypes {
             let arch = unsafe { &mut *(&mut world.archetypes[arch_id] as *mut Archetype) };
-            state.borrow_checker.release_borrow(arch);
+            self.borrow_checker.release_borrow(arch);
         }
     }
 
     pub(crate) fn last_updated_arch_idx(&self) -> ArchetypeId {
-        self.state.borrow().last_updated_arch_idx
+        self.last_updated_arch_idx
     }
 }
 
@@ -704,19 +822,19 @@ pub struct GetGuard<'a, T> {
     inner: T,
     /// List of atomic borrows to release on drop.
     /// Format: (Pointer to AtomicBorrow, is_mutable)
-    borrows: PhantomData<(&'a AtomicBorrow, bool)>,
+    borrows: Vec<(&'a AtomicBorrow, bool)>,
 }
 
 impl<'a, T> Drop for GetGuard<'a, T> {
     fn drop(&mut self) {
-        // // Release all locks acquired for this specific access
-        // for (borrow, is_mut) in &self.borrows {
-        //     if *is_mut {
-        //         borrow.release_mut();
-        //     } else {
-        //         borrow.release();
-        //     }
-        // }
+        // Release all locks acquired for this specific access
+        for (borrow, is_mut) in &self.borrows {
+            if *is_mut {
+                borrow.release_mut();
+            } else {
+                borrow.release();
+            }
+        }
     }
 }
 
@@ -734,11 +852,8 @@ impl<T> std::ops::DerefMut for GetGuard<'_, T> {
 }
 
 impl<'a, T> GetGuard<'a, T> {
-    fn new(inner: T) -> Self {
-        Self {
-            inner,
-            borrows: PhantomData,
-        }
+    fn new(inner: T, borrows: Vec<(&'a AtomicBorrow, bool)>) -> Self {
+        Self { inner, borrows }
     }
 }
 
@@ -748,12 +863,10 @@ impl<'a, T> GetGuard<'a, T> {
 
 /// An iterator that walks through matching archetypes and returns component data.
 /// It holds the locks on the columns for the duration of its lifetime.
-pub struct QueryIter<'a, V: View<'a>, F: Filter> {
+pub struct QueryIter<'a, S, V: View<'a, S>, F: Filter> {
     /// Reference to the world to access archetypes.
     world: &'a UnsafeWorldCell<'a>,
-
-    /// Guard ensuring exclusive access to the QueryInner state during iteration.
-    _state_guard: RefMut<'a, QueryStateInternal>,
+    state: &'a S,
 
     /// List of archetypes that match the query requirements.
     archetype_ids: *const [ArchetypeId],
@@ -762,9 +875,6 @@ pub struct QueryIter<'a, V: View<'a>, F: Filter> {
     current_arch_idx: usize,
     /// The tick used for filter change detection.
     last_query_tick: ChangeTick,
-    /// Reference to the checker in `QueryInner` to release borrows on drop.
-    borrow_checker: *mut ColumnBorrowChecker,
-
     /// The Fetch object for the current archetype. Holds raw pointers to columns.
     current_fetch: Option<V::Fetch>,
     /// The Filter object for the current archetype.
@@ -775,7 +885,7 @@ pub struct QueryIter<'a, V: View<'a>, F: Filter> {
     current_row: usize,
 }
 
-impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
+impl<'a, S, V: View<'a, S>, F: Filter> Iterator for QueryIter<'a, S, V, F> {
     type Item = V::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -826,13 +936,8 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
             // Setup state for new archetype
             self.current_len = unsafe { &*arch }.len();
             self.current_row = 0;
-            self.current_fetch = unsafe {
-                V::create_fetch(
-                    arch,
-                    &self.world.world().registry,
-                    self.world.world().tick(),
-                )
-            };
+            self.current_fetch =
+                unsafe { V::create_fetch(arch, self.world.world().tick(), self.state) };
             self.current_skip_filter = unsafe {
                 F::create_skip_filter(arch, &self.world.world().registry, self.last_query_tick)
             };
@@ -920,13 +1025,8 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
             // Setup state (Identical to next())
             self.current_len = unsafe { &*arch }.len();
             self.current_row = 0;
-            self.current_fetch = unsafe {
-                V::create_fetch(
-                    arch,
-                    &self.world.world().registry,
-                    self.world.world().tick(),
-                )
-            };
+            self.current_fetch =
+                unsafe { V::create_fetch(arch, self.world.world().tick(), self.state) };
             self.current_skip_filter = unsafe {
                 F::create_skip_filter(arch, &self.world.world().registry, self.last_query_tick)
             };
@@ -936,18 +1036,6 @@ impl<'a, V: View<'a>, F: Filter> Iterator for QueryIter<'a, V, F> {
     }
 }
 
-impl<'a, V: View<'a>, F: Filter> Drop for QueryIter<'a, V, F> {
-    fn drop(&mut self) {
-        // Critical: Release the runtime locks on all archetypes we touched.
-        for &arch_id in unsafe { &*self.archetype_ids } {
-            let arch = unsafe {
-                &mut *(&mut self.world.world_mut().archetypes[arch_id] as *mut Archetype)
-            };
-            unsafe { &mut *self.borrow_checker }.release_borrow(arch);
-        }
-        unsafe { &mut *self.borrow_checker }.clear();
-    }
-}
 // ============================================================================
 // Filters
 // ============================================================================
@@ -1172,27 +1260,34 @@ macro_rules! impl_query_tuples {
                 unsafe { $( self.$num.skip(count); )* }
             }
         }
-
-        impl<'a, $($name: View<'a>),*> View<'a> for ($($name,)*) {
-            type Item = ($($name::Item,)*);
-            type Fetch = ($($name::Fetch,)*);
-            unsafe fn create_fetch(arch: *mut Archetype, reg: &ComponentRegistry, tick: ChangeTick) -> Option<Self::Fetch> {
-                unsafe { Some(( $( $name::create_fetch(arch, reg, tick)?, )* )) }
+        paste::paste! {
+            impl<'a, $( [< S $name >] ),* ,  $($name: View<'a, [< S $name >]>),*> View<'a, ($( [< S $name >] ,)*)> for ($($name,)*) {
+                type Item = ($($name::Item,)*);
+                type Fetch = ($($name::Fetch,)*);
+                unsafe fn create_fetch(arch: *mut Archetype, tick: ChangeTick, s: &($( [< S $name >] ,)*)) -> Option<Self::Fetch> {
+                    unsafe { Some(( $( $name::create_fetch(arch, tick, &s.$num)?, )* )) }
+                }
             }
         }
 
         // QueryData Tuple
-        impl<$($name: QueryData),*> QueryData for ($($name,)*) {
-             fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
-                $( $name::populate_ids(registry, out); )*
-            }
-            fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker) {
-                $( $name::borrow_columns(registry, borrow_checker); )*
+        paste::paste! {
+            impl< $( [< S $name >] ),*, $($name: QueryData< [< S $name >] >),*> QueryData<($( [< S $name >] ,)*)> for ($($name,)*) {
+                fn populate_ids(registry: &mut ComponentRegistry, out: &mut Vec<ComponentId>) {
+                    $( $name::populate_ids(registry, out); )*
+                }
+                fn borrow_columns(registry: &ComponentRegistry, borrow_checker: &mut ColumnBorrowChecker) {
+                    $( $name::borrow_columns(registry, borrow_checker); )*
+                }
+                fn create_state(registry: &ComponentRegistry) -> ($( [< S $name >] ,)*) {
+                    ($( $name::create_state(registry) ,)*)
+                }
             }
         }
 
         // QueryToken Tuple (The Bridge)
         impl<$($name: QueryToken),*> QueryToken for ($($name,)*) {
+            type State = ($($name::State,)*);
             type View<'a> = ($($name::View<'a>,)*);
             type Persistent = ($($name::Persistent,)*);
         }
@@ -1242,18 +1337,15 @@ macro_rules! impl_query_tuples {
 auto_impl_all_tuples!(impl_query_tuples);
 
 pub struct QueryState<'w, Q: QueryToken, F: Filter = ()> {
-    inner: QueryInner<Q::Persistent, F::Persistent>,
+    inner: QueryInner<Q::State, Q::Persistent, F::Persistent>,
     pub world: UnsafeWorldCell<'w>,
     _marker: std::marker::PhantomData<(Q, F)>,
 }
 
 impl<'w, Q: QueryToken, F: Filter> QueryState<'w, Q, F> {
     pub fn new(world: &'w mut World) -> Self {
-        let inner = QueryInner::new::<Q, F>(&mut world.registry);
-        {
-            let mut state = inner.state.borrow_mut();
-            inner.update_archetype_cache(world, &mut state);
-        }
+        let mut inner = QueryInner::new::<Q, F>(&mut world.registry);
+        inner.update_archetype_cache(world);
         Self {
             inner,
             world: UnsafeWorldCell::new(world),
@@ -1261,21 +1353,21 @@ impl<'w, Q: QueryToken, F: Filter> QueryState<'w, Q, F> {
         }
     }
 
-    pub fn iter_mut(&mut self) -> QueryIter<'_, Q::View<'_>, F> {
+    pub fn iter_mut(&mut self) -> QueryIter<'_, Q::State, Q::View<'_>, F> {
         self.inner.iter::<Q::View<'_>, F>(&self.world, 0.into())
     }
 
     pub fn get_mut(
         &mut self,
         entity: Entity,
-    ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
+    ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_, Q::State>>::Item>> {
         self.inner
             .get::<Q::View<'_>, F>(&self.world, entity, 0.into())
     }
 
     pub fn for_each_mut<'a, Func>(&'a mut self, func: Func)
     where
-        Func: FnMut(<Q::View<'a> as View<'a>>::Item),
+        Func: FnMut(<Q::View<'a> as View<'a, Q::State>>::Item),
     {
         self.inner
             .for_each::<Q::View<'a>, F, Func>(&self.world, func, 0.into())
@@ -1286,16 +1378,19 @@ impl<'w, Q: QueryToken, F: Filter> QueryState<'w, Q, F>
 where
     Q: ReadOnly,
 {
-    pub fn iter(&self) -> QueryIter<'_, Q::View<'_>, F> {
+    pub fn iter(&self) -> QueryIter<'_, Q::State, Q::View<'_>, F> {
         self.inner.iter::<Q::View<'_>, F>(&self.world, 0.into())
     }
-    pub fn get(&self, entity: Entity) -> Option<GetGuard<'_, <Q::View<'_> as View<'_>>::Item>> {
+    pub fn get(
+        &self,
+        entity: Entity,
+    ) -> Option<GetGuard<'_, <Q::View<'_> as View<'_, Q::State>>::Item>> {
         self.inner
             .get::<Q::View<'_>, F>(&self.world, entity, 0.into())
     }
     pub fn for_each<'a, Func>(&'a self, func: Func)
     where
-        Func: FnMut(<Q::View<'a> as View<'a>>::Item),
+        Func: FnMut(<Q::View<'a> as View<'a, Q::State>>::Item),
     {
         self.inner
             .for_each::<Q::View<'a>, F, Func>(&self.world, func, 0.into())

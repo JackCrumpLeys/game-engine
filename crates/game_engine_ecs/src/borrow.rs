@@ -19,7 +19,7 @@ const COUNTER_MASK: usize = usize::MAX >> 1;
 ///  - `0b10000000...` the counter is mut borrowed
 ///  - `0b1_______...` the counter is mut borrowed, and some other thread is trying to borrow
 #[derive(Debug)]
-pub struct AtomicBorrow;
+pub struct AtomicBorrow(AtomicUsize);
 
 impl Default for AtomicBorrow {
     fn default() -> Self {
@@ -29,20 +29,44 @@ impl Default for AtomicBorrow {
 
 impl AtomicBorrow {
     pub const fn new() -> Self {
-        Self
+        Self(AtomicUsize::new(0))
     }
 
     pub fn borrow(&self) -> bool {
-        true
+        // Add one to the borrow counter
+        let prev_value = self.0.fetch_add(1, Ordering::Acquire);
+
+        // If the previous counter had all of the immutable borrow bits set,
+        // the immutable borrow counter overflowed.
+        if prev_value & COUNTER_MASK == COUNTER_MASK {
+            core::panic!("immutable borrow counter overflowed")
+        }
+
+        // If the mutable borrow bit is set, immutable borrow can't occur. Roll back.
+        if prev_value & UNIQUE_BIT != 0 {
+            self.0.fetch_sub(1, Ordering::Release);
+            false
+        } else {
+            true
+        }
     }
 
     pub fn borrow_mut(&self) -> bool {
-        true
+        self.0
+            .compare_exchange(0, UNIQUE_BIT, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
     }
 
-    pub fn release(&self) {}
+    pub fn release(&self) {
+        let value = self.0.fetch_sub(1, Ordering::Release);
+        debug_assert!(value != 0, "unbalanced release");
+        debug_assert!(value & UNIQUE_BIT == 0, "shared release of unique borrow");
+    }
 
-    pub fn release_mut(&self) {}
+    pub fn release_mut(&self) {
+        let value = self.0.fetch_and(!UNIQUE_BIT, Ordering::Release);
+        debug_assert_ne!(value & UNIQUE_BIT, 0, "unique release of shared borrow");
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -82,7 +106,9 @@ impl ColumnBorrowChecker {
     }
 
     pub fn conflicts(&self, other: &Self) -> bool {
-        if self.mut_borrows.intersects(&other.borrows) {
+        if self.mut_borrows.intersects(&other.borrows)
+            || other.mut_borrows.intersects(&self.borrows)
+        {
             return true;
         }
         false
@@ -145,7 +171,7 @@ impl ColumnBorrowChecker {
         true
     }
 
-    pub fn release_borrow(&mut self, arch: &Archetype) {
+    pub fn release_borrow(&self, arch: &Archetype) {
         for id in &arch.component_ids {
             if self.mut_borrows.has(id.0) {
                 arch.release_column_mut(*id);
@@ -162,7 +188,7 @@ impl ColumnBorrowChecker {
 
     /// Extract raw borrows for these columns in the archetype.
     /// Also indicates whether each borrow is mutable.
-    pub fn get_raw_borrows<'a>(&mut self, arch: &'a Archetype) -> Vec<(&'a AtomicBorrow, bool)> {
+    pub fn get_raw_borrows<'a>(&self, arch: &'a Archetype) -> Vec<(&'a AtomicBorrow, bool)> {
         let mut result = Vec::new();
 
         for id in &arch.component_ids {

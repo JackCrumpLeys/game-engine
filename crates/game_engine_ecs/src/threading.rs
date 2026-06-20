@@ -3,7 +3,15 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use crate::world::World;
+use smallvec::SmallVec;
+
+use crate::{
+    observers::ObserverExecutionQueue,
+    resource::ThreadLocalResources,
+    system::command::{CommandThreadLocalContext, EntityInsertBuffer, ThreadLocalCommandQueue},
+    thread_entity_allocator::LocalThreadEntityAllocator,
+    world::World,
+};
 
 pub const MAX_ECS_THREADS: usize = 128; // Far more than enough for most use cases
 
@@ -43,6 +51,60 @@ impl<T> CachePadded<T> {
 /// Some container owned by a world that holds per-thread data for ECS threads.
 pub struct WorldThreadLocalStore<T> {
     slots: Vec<CachePadded<Option<T>>>, // length == MAX_ECS_THREADS
+    active_cache: SmallVec<usize, MAX_ECS_THREADS>,
+    len_alive: AtomicUsize,
+}
+
+pub struct ThreadLocalWorldData {
+    pub entity_allocator: LocalThreadEntityAllocator,
+    pub insert_buffer: EntityInsertBuffer,
+    pub command_queue: ThreadLocalCommandQueue,
+    pub observer_queue: ObserverExecutionQueue,
+    pub thread_local_resorces: ThreadLocalResources,
+}
+
+impl<'a> CommandThreadLocalContext<'a> {
+    pub fn entity_allocator_mut(&mut self) -> &mut LocalThreadEntityAllocator {
+        self.entity_allocator
+    }
+
+    pub fn insert_buffer_mut(&mut self) -> &mut EntityInsertBuffer {
+        self.insert_buffer
+    }
+}
+
+impl ThreadLocalWorldData {
+    pub fn entity_allocator_mut(&mut self) -> &mut LocalThreadEntityAllocator {
+        &mut self.entity_allocator
+    }
+
+    pub fn insert_buffer_mut(&mut self) -> &mut EntityInsertBuffer {
+        &mut self.insert_buffer
+    }
+
+    pub fn entity_allocator(&self) -> &LocalThreadEntityAllocator {
+        &self.entity_allocator
+    }
+
+    pub fn insert_buffer(&self) -> &EntityInsertBuffer {
+        &self.insert_buffer
+    }
+}
+
+impl FromWorldThread for ThreadLocalWorldData {
+    fn new_thread_local(thread_id: usize, world: &World) -> Self {
+        Self {
+            entity_allocator: LocalThreadEntityAllocator::new_thread_local(thread_id, world),
+            insert_buffer: EntityInsertBuffer::new_thread_local(thread_id, world),
+            command_queue: ThreadLocalCommandQueue::new_thread_local(thread_id, world),
+            observer_queue: ObserverExecutionQueue {
+                waiting: SmallVec::new(),
+                arena: Vec::new(),
+                drop_shims: Vec::new(),
+            },
+            thread_local_resorces: ThreadLocalResources::new_thread_local(thread_id, world),
+        }
+    }
 }
 
 // SAFETY:
@@ -65,7 +127,11 @@ impl<T: FromWorldThread> WorldThreadLocalStore<T> {
         for _ in 0..MAX_ECS_THREADS {
             slots.push(CachePadded::new(None));
         }
-        Self { slots }
+        Self {
+            slots,
+            active_cache: SmallVec::new(),
+            len_alive: AtomicUsize::new(0),
+        }
     }
 
     /// Access the thread-local data.
@@ -88,6 +154,7 @@ impl<T: FromWorldThread> WorldThreadLocalStore<T> {
         // Lazy Init
         if slot.is_none() {
             *slot = Some(T::new_thread_local(thread_id, world));
+            self.len_alive.fetch_add(1, Ordering::Relaxed);
         }
 
         slot.as_mut().unwrap()
@@ -108,6 +175,7 @@ impl<T: FromWorldThread> WorldThreadLocalStore<T> {
         // Lazy Init
         if slot.is_none() {
             *slot = Some(T::new_thread_local(thread_id, world));
+            self.len_alive.fetch_add(1, Ordering::Relaxed);
         }
 
         slot.as_ref().unwrap()
@@ -120,10 +188,24 @@ impl<T: FromWorldThread> WorldThreadLocalStore<T> {
     /// This requires `&mut self`, ensuring no threads are currently running
     /// (e.g., at a sync point in the schedule).
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.slots.iter_mut().filter_map(|padded_slot| {
+        if self.len_alive.load(Ordering::Relaxed) > self.active_cache.len() {
+            self.active_cache = self
+                .slots
+                .iter_mut()
+                .enumerate()
+                .filter_map(|(i, padded_slot)| {
+                    // SAFETY: We have &mut self, so no other threads can be accessing these slots.
+                    unsafe { &mut *padded_slot.inner.get() }.as_ref().map(|_| i)
+                })
+                .collect()
+        }
+
+        self.active_cache.iter().map(|idx| unsafe {
             // SAFETY: We have &mut self, so no other threads can be accessing these slots.
-            let slot = unsafe { &mut *padded_slot.inner.get() };
-            slot.as_mut()
+            // Just above we make sure idx exists and is some
+            (&mut *self.slots.get_unchecked_mut(*idx).inner.get())
+                .as_mut()
+                .unwrap_unchecked()
         })
     }
 }

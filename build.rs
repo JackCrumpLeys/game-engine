@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+use spirv_builder::Capability;
 use spirv_builder::MetadataPrintout;
 use spirv_builder::ModuleResult;
 use spirv_builder::SpirvBuilder;
@@ -12,9 +13,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=crates/game_engine_shaders/src");
 
     // 1. Run the compilation
-    let compile_result = SpirvBuilder::new("crates/game_engine_shaders", "spirv-unknown-vulkan1.4")
+    let compile_result = SpirvBuilder::new("crates/game_engine_shaders", "spirv-unknown-vulkan1.2")
         .print_metadata(MetadataPrintout::Full)
-        .spirv_metadata(SpirvMetadata::NameVariables)
+        .capability(Capability::RuntimeDescriptorArray)
         .build()?;
 
     // 2. Prepare to generate Rust code
