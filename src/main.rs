@@ -1,7 +1,4 @@
 #![feature(duration_constructors_lite)]
-
-pub type GameEngineResult<T> = Result<T, Box<dyn std::error::Error>>;
-
 use std::{
     error::Error,
     time::{Duration, Instant, UNIX_EPOCH},
@@ -465,23 +462,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .chain(std::io::stdout())
         .apply()?;
 
-    impl SystemSet for GameSystems {
-        fn dyn_clone(&self) -> Box<dyn SystemSet> {
-            SystemTypeSet::<GameSystems>::new().dyn_clone()
-        }
-    }
-
-    impl IntoSystemSet<GameSystems> for GameSystems {
-        type Set = GameSystems;
-
-        fn into_set(&self) -> Self::Set {
-            Self
-        }
-    }
-
-    #[derive(PartialEq, Eq, Hash, Debug)]
-    struct GameSystems;
-
     Engine::new()
         .with_window(WindowConfig {
             title: "Game Engine Architectural Flex Suite".into(),
@@ -491,18 +471,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .insert_resource(SuiteState::default())
         .add_plugin(TestRenderPlugin)
         .add_startup_system(setup_timer_system)
-        .add_systems(
-            (
-                increment_time_system,
-                test_orchestrator,
-                animate_swarm_system,
-                animate_wave_system,
-                animate_zoom_system,
-                churn_system,
-                update_timer_system.after(increment_time_system),
-            )
-                .in_set(GameSystems),
-        )
+        .add_systems((
+            increment_time_system,
+            test_orchestrator,
+            animate_swarm_system,
+            animate_wave_system,
+            animate_zoom_system,
+            churn_system,
+            update_timer_system.after(increment_time_system),
+        ))
         .run()?;
 
     Ok(())

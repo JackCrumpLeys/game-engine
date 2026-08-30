@@ -1,7 +1,4 @@
 #![feature(associated_type_defaults)]
-
-#[cfg(not(feature = "tracy"))]
-use std::alloc::GlobalAlloc;
 #[macro_use]
 mod macros;
 pub mod app;
@@ -62,4 +59,4 @@ extern crate self as game_engine_ecs;
 #[cfg(feature = "tracy")]
 #[global_allocator]
 static GLOBAL: tracy_client::ProfiledAllocator<std::alloc::System> =
-    tracy_client::ProfiledAllocator::new(GlobalAlloc, 100);
+    tracy_client::ProfiledAllocator::new(System, 100);

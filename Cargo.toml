@@ -11,10 +11,18 @@ vulkano-shaders = "0.35.0"
 winit = "0.30.12"
 game_engine_derive.workspace = true
 game_engine_shaders_types.workspace = true
+game_engine_render.workspace = true
+tracy-client.workspace = true
 game_engine_ecs.workspace = true
+smallvec.workspace = true
 bytemuck.workspace = true
+rand.workspace = true
+paste.workspace = true
+rayon.workspace = true
 log.workspace = true
 vulkano.workspace = true
+ttf-parser = "0.25.1"
+crossbeam-channel = "0.5.15"
 
 [build-dependencies]
 spirv-builder.workspace = true
@@ -52,6 +60,7 @@ game_engine_shaders = { path = "crates/game_engine_shaders" }
 game_engine_shaders_types = { path = "crates/game_engine_shaders_types" }
 game_engine_ecs = { path = "crates/game_engine_ecs" }
 game_engine_utils = { path = "crates/game_engine_utils" }
+game_engine_render = { path = "crates/game_engine_render" }
 
 bytemuck = { version = "1.24.0", features = ["derive"] }
 

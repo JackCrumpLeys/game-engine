@@ -1,4 +1,3 @@
-}
 //! Analytical TrueType font rasterizer via GPU signed distance fields.
 
 use game_engine_shaders_types::packet::GpuCurve;
@@ -164,3 +163,4 @@ impl<'a> ttf_parser::OutlineBuilder for PathCurveBuilder<'a> {
             self.add_curve(p1, self.contour_start);
         }
     }
+}

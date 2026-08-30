@@ -265,3 +265,4 @@ impl Engine {
     }
 }
 
+pub type GameEngineResult<T> = Result<T, Box<dyn std::error::Error>>;

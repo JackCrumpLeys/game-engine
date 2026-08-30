@@ -487,5 +487,97 @@ impl PassManager {
         }
 
         self.profiler.submit += t.elapsed();
+        self.profiler.total += start_total.elapsed();
+        self.profiler.frames += 1;
+
+        // Print Report Every 2 seconds
+        if self.profiler.total.as_secs_f32() >= 2.0 {
+            let f = self.profiler.frames as f32;
+            log::info!("=== Render Pass Breakdown (Avg over {f} frames) ===");
+            log::info!(
+                "Cleanup    : {:.3} ms",
+                self.profiler.cleanup.as_secs_f32() * 1000.0 / f
+            );
+            log::info!(
+                "Acquire    : {:.3} ms",
+                self.profiler.acquire.as_secs_f32() * 1000.0 / f
+            );
+            log::info!(
+                "Cmd Alloc  : {:.3} ms",
+                self.profiler.cmd_alloc.as_secs_f32() * 1000.0 / f
+            );
+            log::info!(
+                "Upload     : {:.3} ms",
+                self.profiler.upload.as_secs_f32() * 1000.0 / f
+            );
+            log::info!(
+                "Desc Sets  : {:.3} ms",
+                self.profiler.desc_sets.as_secs_f32() * 1000.0 / f
+            );
+            log::info!(
+                "Record Draw: {:.3} ms",
+                self.profiler.record_draw.as_secs_f32() * 1000.0 / f
+            );
+            log::info!(
+                "Build Cmd  : {:.3} ms",
+                self.profiler.build_cmd.as_secs_f32() * 1000.0 / f
+            );
+            log::info!(
+                "Submit     : {:.3} ms",
+                self.profiler.submit.as_secs_f32() * 1000.0 / f
+            );
+            log::info!(
+                "Total Pass : {:.3} ms",
+                self.profiler.total.as_secs_f32() * 1000.0 / f
+            );
+            log::info!("==================================================");
+            self.profiler = PassProfiler::default();
+        }
+
+        log::trace!("do_pass end");
+        Ok(if suboptimal {
+            PassResult::SwapchainOutOfDate
+        } else {
+            PassResult::Success
+        })
     }
+    /// Handles window resizing by recreating framebuffers
+    pub fn resize(&mut self, images: &[Arc<Image>]) {
+        // Drop the in-flight fence; on resize we accept finishing/abandoning the prior frame.
+        if let Some(f) = self.last_frame_fence.take() {
+            let _ = f.wait(None);
+        }
+        self.framebuffers = window_size_dependent_setup(images, &self.render_pass);
+        if let Some(image) = images.first() {
+            let extent = image.extent();
+            self.viewport.extent = [extent[0] as f32, extent[1] as f32];
+        }
+    }
+}
+
+pub enum PassResult {
+    Success,
+    SwapchainOutOfDate,
+}
+
+/// Creates the Framebuffer objects for each swapchain image
+fn window_size_dependent_setup(
+    images: &[Arc<Image>],
+    render_pass: &Arc<RenderPass>,
+) -> Vec<Arc<Framebuffer>> {
+    images
+        .iter()
+        .map(|image| {
+            let view = vulkano::image::view::ImageView::new_default(image.clone()).unwrap();
+
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![view],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>()
 }

@@ -1,6 +1,5 @@
-game_engine_shaders_types::for_all_shapes!(define_render_system);
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TextureHandle(pub u32);

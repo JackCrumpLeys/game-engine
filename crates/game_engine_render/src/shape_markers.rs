@@ -123,3 +123,4 @@ impl_stack_pattern!(A, B, C, D);
 impl_stack_pattern!(A, B, C, D, E);
 impl_stack_pattern!(A, B, C, D, E, F);
 impl_stack_pattern!(A, B, C, D, E, F, G);
+impl_stack_pattern!(A, B, C, D, E, F, G, H);

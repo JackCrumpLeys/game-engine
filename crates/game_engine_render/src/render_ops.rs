@@ -128,3 +128,4 @@ impl<'a> PatchBuilder<'a> {
             });
         }
     }
+}

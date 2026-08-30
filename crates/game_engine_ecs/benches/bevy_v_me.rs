@@ -6,6 +6,7 @@ use bevy_ecs::prelude::{
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use game_engine_derive::Component;
 use game_engine_ecs::prelude::*;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator};
 // --- Components for Your Engine ---
 
 #[derive(Debug, Clone, Copy, Default, Component)]
@@ -37,7 +38,7 @@ struct BMarker;
 
 const ENTITY_COUNT_1M: usize = 1_000_000;
 const ENTITY_COUNT_FRAG: usize = 10_000;
-const CORE_COUNT: usize = 24;
+const THREADS: usize = 1;
 
 /// 1. MASS SPAWNING (1,000,000 entities)
 fn bench_mass_spawn(c: &mut Criterion) {
@@ -47,10 +48,11 @@ fn bench_mass_spawn(c: &mut Criterion) {
         b.iter_batched(
             World::new,
             |mut world| {
-                for _ in 0..ENTITY_COUNT_1M {
-                    world
-                        .spawn_deferred((Position { x: 1.0, y: 1.0 }, Velocity { x: 1.0, y: 1.0 }));
-                }
+                world.system_param_with::<Commands, _, _>(|commands| {
+                    for _ in 0..ENTITY_COUNT_1M {
+                        commands.spawn((Position { x: 1.0, y: 1.0 }, Velocity { x: 1.0, y: 1.0 }));
+                    }
+                });
                 world.flush();
             },
             BatchSize::SmallInput,
@@ -61,10 +63,9 @@ fn bench_mass_spawn(c: &mut Criterion) {
         b.iter_batched(
             BevyWorld::new,
             |mut world| {
+                let mut co = world.commands();
                 for _ in 0..ENTITY_COUNT_1M {
-                    world
-                        .commands()
-                        .spawn((BPosition { x: 1.0, y: 1.0 }, BVelocity { x: 1.0, y: 1.0 }));
+                    co.spawn((BPosition { x: 1.0, y: 1.0 }, BVelocity { x: 1.0, y: 1.0 }));
                 }
                 world.flush();
             },
@@ -189,12 +190,197 @@ fn bench_fragmentation(c: &mut Criterion) {
 
     group.finish();
 }
+// --- Heavy Computation Helper ---
+// This function will force the CPU to do some complex math for every spawn,
+// based on the total global index of the spawn.
+#[inline]
+fn compute_heavy_data(idx: usize) -> [f32; 4] {
+    let x = (idx as f32) + 1.0; // +1.0 to avoid ln(0) or division by zero issues
+    [
+        (x * 0.123).sin() * (x * 0.456).cos(), // Trig mix
+        (x * 0.789).sqrt(),                    // Square root
+        x.ln_1p(),                             // Natural log
+        x.powf(1.1) % 100.0,                   // Power and modulo
+    ]
+}
 
+// --- Interleaved Archetypes Macro (With Heavy Data Computation) ---
+
+macro_rules! bench_interleaved_archetypes {
+    ( $( ($my_comp:ident, $bevy_comp:ident) ),* ) => {
+
+        // 1. Generate the 100 Data components for My Engine
+        $(
+            #[derive(Debug, Clone, Copy, Component)]
+            struct $my_comp {
+                data: [f32; 4],
+            }
+        )*
+
+        // 2. Generate the 100 Data components for Bevy
+        $(
+            #[derive(BevyComponent, Clone, Copy)]
+            struct $bevy_comp {
+                data: [f32; 4],
+            }
+        )*
+
+        // 3. Define the Benchmark Function
+        fn bench_100_archetypes_interleaved(c: &mut Criterion) {
+            let mut group = c.benchmark_group("Interleaved Archetypes (100x100)");
+
+            group.bench_function("My Engine: Interleaved 100x100", |b| {
+                b.iter_batched(
+                    World::new,
+                    |mut world| {
+                        world.system_param_with::<Commands, _, _>(|commands| {
+                            let mut spawn_idx = 0;
+                            for _ in 0..100 {
+                                $(
+                                    let data = compute_heavy_data(spawn_idx);
+                                    commands.spawn((Position::default(), $my_comp { data }));
+                                    spawn_idx += 1;
+                                )*
+                            }
+                        });
+                        world.flush();
+                    },
+                    BatchSize::SmallInput,
+                );
+            });
+
+            group.bench_function("Bevy: Interleaved 100x100", |b| {
+                b.iter_batched(
+                    BevyWorld::new,
+                    |mut world| {
+                        let mut spawn_idx = 0;
+                        for _ in 0..100 {
+                            $(
+                                let data = compute_heavy_data(spawn_idx);
+                                world.commands().spawn((BPosition::default(), $bevy_comp { data }));
+                                spawn_idx += 1;
+                            )*
+                        }
+                        world.flush();
+                    },
+                    BatchSize::SmallInput,
+                );
+            });
+
+            group.finish();
+        }
+    };
+}
+
+// Invoke the macro with 100 pairs of components (C0-C99 and BC0-BC99)
+bench_interleaved_archetypes!(
+    (C0, BC0),
+    (C1, BC1),
+    (C2, BC2),
+    (C3, BC3),
+    (C4, BC4),
+    (C5, BC5),
+    (C6, BC6),
+    (C7, BC7),
+    (C8, BC8),
+    (C9, BC9),
+    (C10, BC10),
+    (C11, BC11),
+    (C12, BC12),
+    (C13, BC13),
+    (C14, BC14),
+    (C15, BC15),
+    (C16, BC16),
+    (C17, BC17),
+    (C18, BC18),
+    (C19, BC19),
+    (C20, BC20),
+    (C21, BC21),
+    (C22, BC22),
+    (C23, BC23),
+    (C24, BC24),
+    (C25, BC25),
+    (C26, BC26),
+    (C27, BC27),
+    (C28, BC28),
+    (C29, BC29),
+    (C30, BC30),
+    (C31, BC31),
+    (C32, BC32),
+    (C33, BC33),
+    (C34, BC34),
+    (C35, BC35),
+    (C36, BC36),
+    (C37, BC37),
+    (C38, BC38),
+    (C39, BC39),
+    (C40, BC40),
+    (C41, BC41),
+    (C42, BC42),
+    (C43, BC43),
+    (C44, BC44),
+    (C45, BC45),
+    (C46, BC46),
+    (C47, BC47),
+    (C48, BC48),
+    (C49, BC49),
+    (C50, BC50),
+    (C51, BC51),
+    (C52, BC52),
+    (C53, BC53),
+    (C54, BC54),
+    (C55, BC55),
+    (C56, BC56),
+    (C57, BC57),
+    (C58, BC58),
+    (C59, BC59),
+    (C60, BC60),
+    (C61, BC61),
+    (C62, BC62),
+    (C63, BC63),
+    (C64, BC64),
+    (C65, BC65),
+    (C66, BC66),
+    (C67, BC67),
+    (C68, BC68),
+    (C69, BC69),
+    (C70, BC70),
+    (C71, BC71),
+    (C72, BC72),
+    (C73, BC73),
+    (C74, BC74),
+    (C75, BC75),
+    (C76, BC76),
+    (C77, BC77),
+    (C78, BC78),
+    (C79, BC79),
+    (C80, BC80),
+    (C81, BC81),
+    (C82, BC82),
+    (C83, BC83),
+    (C84, BC84),
+    (C85, BC85),
+    (C86, BC86),
+    (C87, BC87),
+    (C88, BC88),
+    (C89, BC89),
+    (C90, BC90),
+    (C91, BC91),
+    (C92, BC92),
+    (C93, BC93),
+    (C94, BC94),
+    (C95, BC95),
+    (C96, BC96),
+    (C97, BC97),
+    (C98, BC98),
+    (C99, BC99)
+);
 criterion_group!(
     benches,
     bench_mass_spawn,
     bench_iteration,
-    bench_fragmentation
+    bench_fragmentation,
+    bench_100_archetypes_interleaved,
 );
 
 fn main() {

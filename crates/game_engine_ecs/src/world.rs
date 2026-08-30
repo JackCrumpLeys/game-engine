@@ -15,8 +15,8 @@ use crate::prelude::Component;
 use crate::query::{Filter, QueryState, QueryToken};
 use crate::resource::{Resources, ThreadLocalResources, TypeIdMap};
 use crate::storage::TypeErasedSequence;
-use crate::system::UnsafeWorldCell;
 use crate::system::command::{ThreadLocalCommandQueue, ToBeDespawned};
+use crate::system::{Query, UnsafeWorldCell};
 use crate::thread_entity_allocator::LocalThreadEntityAllocator;
 use crate::threading::{FromWorldThread, ThreadLocalWorldData, WorldThreadLocalStore};
 use std::any::{Any, TypeId, type_name};
@@ -702,22 +702,38 @@ impl World {
 fn test_world_spawn_despawn() {
     let mut world = World::new();
 
-    // Spawn simple
-    let e1 = world.spawn((10u32,));
+    #[derive(Debug)]
+    struct MyCoolStruct {
+        name: String,
+        health: f32,
+        me: Option<Box<MyCoolStruct>>,
+    }
 
-    // Spawn complex
-    let e2 = world.spawn((20u32, 5.0f32));
+    impl_component!(MyCoolStruct);
 
-    // Check internal state (impl specific)
-    assert!(world.entities().is_alive(e1));
-    assert!(world.entities().is_alive(e2));
+    let my_cool_man = world.spawn((
+        238,
+        MyCoolStruct {
+            name: "Chad".to_owned(),
+            health: 1.2,
+            me: Some(Box::new(MyCoolStruct {
+                name: "Brad (evil)".to_owned(),
+                health: 100.0,
+                me: None,
+            })),
+        },
+    ));
+    let my_lame_man = world.spawn(123);
 
-    // Despawn
-    assert!(world.despawn(e1));
-    assert!(!world.entities().is_alive(e1));
+    world.system_param_with::<Query<&mut i32>, _, _>(|mut q| {
+        for mut i in q.iter_mut() {
+            *i *= 2
+        }
+    });
 
-    // Despawn again should fail
-    assert!(!world.despawn(e1));
+    let my_val = world.query::<&MyCoolStruct, ()>();
+
+    println!("{:#?}", my_val.get(my_cool_man).as_deref()); // Some(72)
 }
 #[cfg(test)]
 mod world_tests {

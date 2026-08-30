@@ -4,13 +4,12 @@
 #![no_std]
 
 use game_engine_shaders_types::packet::{
-    BEZIER_PATH_SHAPE_INDEX, CIRCLE_SHAPE_INDEX, CLIP_RECT_SHAPE_INDEX, GLYPH_SHAPE_INDEX,
-    GpuBezierPathPacket, GpuCirclePacket, GpuClipRectPacket, GpuEntityHead, GpuGlyphPacket,
-    GpuLineSegmentPacket, GpuLinearGradientPacket, GpuRadialGradientPacket, GpuRectPacket,
-    GpuRoundedRectPacket, GpuSpritePacket, GpuStrokePacket, InstancePointer,
-    LINEAR_GRADIENT_SHAPE_INDEX, LINESEGMENT_SHAPE_INDEX, RADIAL_GRADIENT_SHAPE_INDEX,
-    RECT_SHAPE_INDEX, ROUNDED_RECT_SHAPE_INDEX, SPRITE_SHAPE_INDEX, STROKE_SHAPE_INDEX,
-    TRIANGLE_SHAPE_INDEX,
+    CIRCLE_SHAPE_INDEX, CLIP_RECT_SHAPE_INDEX, GpuCirclePacket, GpuClipRectPacket, GpuEntityHead,
+    GpuLineSegmentPacket, GpuLinearGradientPacket, GpuGlyphPacket, GpuBezierPathPacket, GpuRadialGradientPacket,
+    GpuRectPacket, GpuRoundedRectPacket, GpuSpritePacket, GpuStrokePacket, InstancePointer,
+    LINEAR_GRADIENT_SHAPE_INDEX, LINESEGMENT_SHAPE_INDEX, GLYPH_SHAPE_INDEX, BEZIER_PATH_SHAPE_INDEX,
+    RADIAL_GRADIENT_SHAPE_INDEX, RECT_SHAPE_INDEX, ROUNDED_RECT_SHAPE_INDEX,
+    SPRITE_SHAPE_INDEX, STROKE_SHAPE_INDEX, TRIANGLE_SHAPE_INDEX,
 };
 use game_engine_shaders_types::{
     PushConstants, Vec2, Vec4,

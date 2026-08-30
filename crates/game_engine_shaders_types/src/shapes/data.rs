@@ -3,45 +3,75 @@ use bytemuck::{Pod, Zeroable};
 use game_engine_derive::InterpolateM;
 use spirv_std::glam::Vec4;
 
-// ── ColorRGBA ────────────────────────────────────────────────────────
-
 #[derive(Copy, Clone, Zeroable, Pod, Debug, InterpolateM)]
 #[repr(C)]
-pub struct ColorRGBA(Vec4);
+pub struct ColorRGBA {
+    pub rgba: Vec4,
+}
 
 impl Default for ColorRGBA {
     fn default() -> Self {
-        Self(Vec4::new(0.0, 1.0, 0.0, 1.0))
+        Self {
+            rgba: Vec4::new(0.0, 1.0, 0.0, 1.0),
+        }
     }
 }
 
 impl ColorRGBA {
-    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self { Self(Vec4::new(r, g, b, a)) }
-    pub fn get(self) -> Vec4 { self.0 }
-    pub fn red(&self) -> f32 { self.0.x }
-    pub fn red_mut(&mut self) -> &mut f32 { &mut self.0.x }
-    pub fn green(&self) -> f32 { self.0.y }
-    pub fn green_mut(&mut self) -> &mut f32 { &mut self.0.y }
-    pub fn blue(&self) -> f32 { self.0.z }
-    pub fn blue_mut(&mut self) -> &mut f32 { &mut self.0.z }
-    pub fn alpha(&self) -> f32 { self.0.w }
-    pub fn alpha_mut(&mut self) -> &mut f32 { &mut self.0.w }
+    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self {
+            rgba: Vec4::new(r, g, b, a),
+        }
+    }
+
+    pub fn get(self) -> Vec4 {
+        self.rgba
+    }
+
+    pub fn red(&self) -> f32 {
+        self.rgba.x
+    }
+    pub fn red_mut(&mut self) -> &mut f32 {
+        &mut self.rgba.x
+    }
+
+    pub fn green(&self) -> f32 {
+        self.rgba.y
+    }
+    pub fn green_mut(&mut self) -> &mut f32 {
+        &mut self.rgba.y
+    }
+
+    pub fn blue(&self) -> f32 {
+        self.rgba.z
+    }
+    pub fn blue_mut(&mut self) -> &mut f32 {
+        &mut self.rgba.z
+    }
+
+    pub fn alpha(&self) -> f32 {
+        self.rgba.w
+    }
+    pub fn alpha_mut(&mut self) -> &mut f32 {
+        &mut self.rgba.w
+    }
 
     pub fn from_hsl(h: f32, s: f32, l: f32) -> Self {
         use spirv_std::glam::Vec3;
         let k = Vec3::new(0.0, 4.0, 2.0);
         let t = (Vec3::splat(h) * 6.0 + k) % 6.0;
         let rgb = ((t - 3.0).abs() - 1.0).clamp(Vec3::ZERO, Vec3::ONE);
-        Self((l + s * (rgb - 0.5) * (1.0 - (2.0 * l - 1.0).abs())).extend(1.0))
+        Self {
+            rgba: (l + s * (rgb - 0.5) * (1.0 - (2.0 * l - 1.0).abs())).extend(1.0),
+        }
     }
 }
-
-// ── Stroked wrapper (generic, used by old composite shapes) ──────────
 
 #[derive(Copy, Clone, Zeroable, Debug, InterpolateM)]
 #[repr(C)]
 pub struct Stroked<T>
-where T: GpuPacket,
+where
+    T: GpuPacket,
 {
     pub inner: T,
     pub color: ColorRGBA,

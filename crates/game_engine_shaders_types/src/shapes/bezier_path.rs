@@ -1,3 +1,4 @@
+
 use bytemuck::{Pod, Zeroable};
 use game_engine_derive::InterpolateM;
 use spirv_std::glam::Vec2;

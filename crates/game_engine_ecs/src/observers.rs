@@ -638,6 +638,19 @@ mod tests {
     use std::{mem, sync::Once};
 
     static INIT: Once = Once::new();
+
+    fn setup_all() {
+        // Initialization code here. This runs once before any test in this file.
+        INIT.call_once(|| {
+            println!("Running global setup for the test binary!");
+
+            #[cfg(feature = "tracy")]
+            let _client = tracy_client::Client::start();
+
+            #[cfg(feature = "tracy")]
+            tracy_client::register_demangler!();
+        });
+    }
     use game_engine_derive::Component;
     use rand::seq::SliceRandom;
 

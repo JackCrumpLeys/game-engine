@@ -44,4 +44,3 @@ pub trait SdfShape {
     }
 }
 
-
